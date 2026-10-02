@@ -1,0 +1,33 @@
+# Keil MDK 编译输出
+Objects/
+Listings/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.lst
+*.map
+*.htm
+*.lnp
+*.dep
+*.build_log.htm
+build.log
+
+# Keil 用户配置（含本地路径）
+Project.uvguix.*
+*.uvguix.*
+
+# 调试配置
+DebugConfig/
+
+# VS Code / 其他编辑器
+.vscode/
+.codeartsdoer/
+*.code-workspace
+
+# 临时文件
+*.tmp
+*.bak
+*~
