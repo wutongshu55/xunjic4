@@ -110,6 +110,7 @@ void Menu_KeyHandler(uint8_t key)
 
                     /* 发车前把两个闭环的状态清干净 */
                     Speed_Loop_Reset();          /* 速度环积分 */
+                    Speed_Fault_Reset();         /* 故障标志重新检测 */
                     Track_StateMachine_Reset();  /* 赛道状态机 */
                     Menu_Running = 1;   /* 发车 */
                     Beep_On(200);
@@ -130,16 +131,24 @@ void Menu_KeyHandler(uint8_t key)
             }
             break;
 
-        case 4: /* 距离测试页: KEY3=清零峰值  KEY4=切换显示模式 */
+        case 4: /* 距离/编码器测试页: KEY3=清零  KEY4=切换显示模式 */
             if (key == 3)
             {
-                ADC_Peak_Reset();
+                if (Menu_DistRaw == 3)
+                {
+                    Encoder_L_Total = 0;    /* 模式3: 清零里程计数 */
+                    Encoder_R_Total = 0;
+                }
+                else
+                {
+                    ADC_Peak_Reset();
+                }
                 Beep_On(60);
             }
             else if (key == 4)
             {
                 Menu_DistRaw++;
-                if (Menu_DistRaw > 2) Menu_DistRaw = 0;
+                if (Menu_DistRaw > 3) Menu_DistRaw = 0;
                 Menu_Inited = 0;        /* 标签随模式变化, 强制重画 */
             }
             break;
@@ -239,13 +248,23 @@ void Menu_Display(void)
                     OLED_ShowString(3, 1, "V");
                     OLED_ShowString(4, 1, "SAT  K3:CLR");
                 }
-                else
+                else if (Menu_DistRaw == 2)
                 {
                     /* 峰值保持: 推到十字/环岛看峰值是否落在 3200~3600 */
                     OLED_ShowString(1, 1, "= Dist Peak=");
                     OLED_ShowString(2, 1, "H");
                     OLED_ShowString(3, 1, "V");
                     OLED_ShowString(4, 1, "SAT  K3:CLR");
+                }
+                else
+                {
+                    /* 编码器自检: 手推车 1 米, 看 L/R 速度和总计数是否在动 */
+                    OLED_ShowString(1, 1, "= Enc Test =");
+                    OLED_ShowString(2, 1, "L");
+                    OLED_ShowString(2, 8, "R");
+                    OLED_ShowString(3, 1, "CL");
+                    OLED_ShowString(4, 1, "CR");
+                    OLED_ShowString(4, 12, "K3:CLR");
                 }
                 break;
             case 5: /* Kp: 顺带显示实时 E / D, 一边拧一边看 */
@@ -316,6 +335,14 @@ void Menu_Display(void)
                 OLED_ShowNum(4, 2, ADC_Strength, 2);
                 OLED_ShowNum(4, 7, (uint16_t)ADC_H_StrengthF, 2);
                 OLED_ShowNum(4, 12, (uint16_t)ADC_V_StrengthF, 2);
+            }
+            else if (Menu_DistRaw == 3)
+            {
+                /* 编码器自检: 左/右速度(mm/s) + 累计计数(推车验证用) */
+                OLED_ShowSignedNum(2, 2, Speed_L_mms, 4);
+                OLED_ShowSignedNum(2, 9, Speed_R_mms, 4);
+                OLED_ShowSignedNum(3, 3, Encoder_L_Total, 6);
+                OLED_ShowSignedNum(4, 3, Encoder_R_Total, 6);
             }
             else
             {
@@ -411,8 +438,14 @@ void Menu_RunDisplay(void)
     OLED_ShowNum(3, 7,  Speed_Avg_mms, 3);
     OLED_ShowNum(3, 12, Menu_DoneLaps, 1);
     OLED_ShowNum(3, 14, Menu_TargetLaps, 1);
-    /* 第4行: 赛道状态 / 十字计数 / 左轮占空比 */
+    /* 第4行: 赛道状态 / 十字计数 / 左轮占空比 / 速度环故障标志 */
     OLED_ShowNum(4, 2,  Track_State, 1);
     OLED_ShowNum(4, 5,  Menu_CrossCount, 2);
     OLED_ShowNum(4, 9,  Duty_L, 4);
+
+    /* F1 = 测不到速度(已自动降级开环)  F2 = 编码器反接(已自动纠正)
+     * 两个都是"车还能跑但配置有问题"的提示, 看到就停车检查编码器。 */
+    if (Speed_Fault == 0)      OLED_ShowString(4, 14, "  ");
+    else if (Speed_Fault == 1) OLED_ShowString(4, 14, "F1");
+    else                       OLED_ShowString(4, 14, "F2");
 }

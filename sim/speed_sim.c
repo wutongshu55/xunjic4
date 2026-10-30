@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 速度闭环仿真 —— 用一个一阶电机模型验证 PI + 前馈 + 死区补偿
  *
  * 编译:
@@ -14,6 +14,7 @@
 #define ENC_PERIOD_MS 20
 
 static float s_v = 0.0f;            /* 真实轮速 */
+static int   s_enc_mode = 0;        /* 0=正常 1=无信号 2=反接 */
 static int16_t s_duty_a = 0, s_duty_b = 0;
 
 static void Plant_Step(float dt)
@@ -29,6 +30,10 @@ static void Plant_Step(float dt)
 }
 
 /* ---------------- 被测代码需要的桩 ---------------- */
+static int s_beep_cnt = 0;
+
+void Beep_On(uint16_t ms) { (void)ms; s_beep_cnt++; }
+
 static GPIO_TypeDef g_gpioa, g_gpiob;
 GPIO_TypeDef *GPIOA = &g_gpioa;
 GPIO_TypeDef *GPIOB = &g_gpiob;
@@ -66,7 +71,11 @@ static float Run(int ms, float *peak_out)
         /* 每 20ms 更新一次"测到的"速度(带量化) */
         if ((s_t % ENC_PERIOD_MS) == 0)
         {
-            Speed_L_mms = (int32_t)((float)(int)(s_v / ENC_RES + 0.5f) * ENC_RES);  /* 量化(四舍五入) */
+            float meas = s_v;
+            if (s_enc_mode == 1)      meas = 0.0f;    /* 编码器断线: 永远测到 0 */
+            else if (s_enc_mode == 2) meas = -s_v;    /* A/B 反接: 测到负速度 */
+
+            Speed_L_mms = (int32_t)((float)(int)(meas / ENC_RES + 0.5f) * ENC_RES);  /* 量化(四舍五入) */
             Speed_R_mms = Speed_L_mms;
             Speed_Avg_mms = Speed_L_mms;
         }
@@ -87,6 +96,8 @@ static void Reset_Plant(void)
     s_duty_b = 0;
     Speed_Delta = 0;
     Speed_Loop_Reset();
+    Speed_Fault_Reset();
+    s_enc_mode = 0;
     Speed_Loop_En = 1;
     Speed_KpS = 12.0f;      /* 与 Motor.c 的默认值保持一致 */
     Speed_KiS = 60.0f;
@@ -213,6 +224,30 @@ int main(void)
     Run(200, NULL);
     printf("  占空比 %d, 实际 %.2f mm/s\n", s_duty_a, s_v);
     CHECK(s_duty_a == 0, "停车时占空比应为 0: %d", s_duty_a);
+
+    /* ---- 7. 编码器断线: 低档也必须受限, 不许跑满 ---- */
+    printf("\n[7] 编码器断线(测速恒 0), 低档 300mm/s\n");
+    Reset_Plant();
+    s_enc_mode   = 1;
+    Speed_Basic  = 300;
+    Run(1500, &peak);
+    printf("  故障标志 F%u, 占空比 %d, 实际 %.1f mm/s (峰值 %.1f)\n",
+           Speed_Fault, s_duty_a, s_v, peak);
+    CHECK(Speed_Fault == 1,            "应检测到测速失效(F1), 实际 F%u", Speed_Fault);
+    CHECK(s_duty_a <= 7400,            "降级后占空比应受限(<=7400), 实际 %d", s_duty_a);
+    CHECK(s_v <= 420.0f,               "降级后速度应受限(<=420), 实际 %.1f", s_v);
+
+    /* ---- 8. 编码器 A/B 反接: 自动纠正后仍要闭环到目标 ---- */
+    printf("\n[8] 编码器 A/B 反接(测速为负), 低档 300mm/s\n");
+    Reset_Plant();
+    s_enc_mode  = 2;
+    Speed_Basic = 300;
+    Run(2000, &peak);
+    printf("  故障标志 F%u, 占空比 %d, 实际 %.1f mm/s (峰值 %.1f)\n",
+           Speed_Fault, s_duty_a, s_v, peak);
+    CHECK(Speed_Fault == 2,            "应识别为编码器反接(F2), 实际 F%u", Speed_Fault);
+    CHECK(fabsf(s_v - 300.0f) <= 40.0f, "纠正后应闭环到 300, 实际 %.1f", s_v);
+    CHECK(peak <= 300.0f * 1.8f,       "纠正过程不应冲到满速: 峰值 %.1f", peak);
 
     printf("\n=========================================\n");
     printf(" checks=%d  failures=%d  -> %s\n", g_checks, g_fail, g_fail ? "FAIL" : "ALL PASS");
