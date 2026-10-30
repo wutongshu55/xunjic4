@@ -653,8 +653,9 @@ function fitView(){
   for(const p of mainPts){ mnx=Math.min(mnx,p.x);mny=Math.min(mny,p.y);mxx=Math.max(mxx,p.x);mxy=Math.max(mxy,p.y); }
   const w=mxx-mnx,h=mxy-mny;
   view.cx=(mnx+mxx)/2; view.cy=(mny+mxy)/2;
-  const s=Math.min(cv.clientWidth/(w+400), cv.clientHeight/(h+400));
-  view.scale=s;
+  const cw=cv.clientWidth||1200, ch=cv.clientHeight||800;
+  const s=Math.min(cw/(w+400), ch/(h+400));
+  view.scale=s>0?s:0.2;
 }
 function w2s(x,y){ return [(x-view.cx)*view.scale+cv.width/2,(y-view.cy)*view.scale+cv.height/2]; }
 function draw(){
@@ -843,8 +844,9 @@ cv.addEventListener('wheel',e=>{
 },{passive:false});
 
 /* 动画循环 */
-let raf=0;
+let raf=0, fitted=false;
 function loop(){
+  if(!fitted){ fitView(); fitted=true; }
   const spd=parseInt($('sim-speed').value);
   if(running){ for(let i=0;i<spd;i++) step5ms(); updateUI(); }
   draw();
