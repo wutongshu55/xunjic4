@@ -60,6 +60,6 @@ void PWMB_SetDuty(int16_t Duty)
 
     Duty = Duty < 0 ? 0 : Duty;
     Duty = Duty > PWM_DUTY_MAX ? PWM_DUTY_MAX : Duty;
-    CCR4_Data = (uint16_t)((Period_Data + 1) * ((float)Duty / PWM_DUTY_MAX));
+    CCR4_Data = (uint16_t)(Period_Data * ((float)Duty / PWM_DUTY_MAX));
     TIM_SetCompare4(TIM3, CCR4_Data);
 }

@@ -1,4 +1,4 @@
-# Keil MDK 编译输出
+﻿# Keil MDK 编译输出
 Objects/
 Listings/
 *.o
@@ -31,3 +31,7 @@ DebugConfig/
 *.tmp
 *.bak
 *~
+
+# 主机端仿真编译产物
+sim/*.exe
+*.exe

@@ -5,13 +5,16 @@
 #define OLED_W_SCL(x)		GPIO_WriteBit(GPIOB, GPIO_Pin_8, (BitAction)(x))
 #define OLED_W_SDA(x)		GPIO_WriteBit(GPIOB, GPIO_Pin_9, (BitAction)(x))
 
+/* 简单延时, 保证 I2C 时序不过快(SSD1306 支持 100kHz/400kHz) */
+#define OLED_I2C_DELAY()	{ volatile uint8_t _d; for(_d=0;_d<10;_d++); }
+
 /*引脚初始化*/
 void OLED_I2C_Init(void)
 {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
 	
 	GPIO_InitTypeDef GPIO_InitStructure;
- 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
+ 	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
 	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
 	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8;
  	GPIO_Init(GPIOB, &GPIO_InitStructure);
@@ -30,9 +33,13 @@ void OLED_I2C_Init(void)
 void OLED_I2C_Start(void)
 {
 	OLED_W_SDA(1);
+	OLED_I2C_DELAY();
 	OLED_W_SCL(1);
+	OLED_I2C_DELAY();
 	OLED_W_SDA(0);
+	OLED_I2C_DELAY();
 	OLED_W_SCL(0);
+	OLED_I2C_DELAY();
 }
 
 /**
@@ -43,8 +50,11 @@ void OLED_I2C_Start(void)
 void OLED_I2C_Stop(void)
 {
 	OLED_W_SDA(0);
+	OLED_I2C_DELAY();
 	OLED_W_SCL(1);
+	OLED_I2C_DELAY();
 	OLED_W_SDA(1);
+	OLED_I2C_DELAY();
 }
 
 /**
@@ -58,11 +68,16 @@ void OLED_I2C_SendByte(uint8_t Byte)
 	for (i = 0; i < 8; i++)
 	{
 		OLED_W_SDA(!!(Byte & (0x80 >> i)));
+		OLED_I2C_DELAY();
 		OLED_W_SCL(1);
+		OLED_I2C_DELAY();
 		OLED_W_SCL(0);
+		OLED_I2C_DELAY();
 	}
 	OLED_W_SCL(1);	//额外的一个时钟，不处理应答信号
+	OLED_I2C_DELAY();
 	OLED_W_SCL(0);
+	OLED_I2C_DELAY();
 }
 
 /**
@@ -272,7 +287,7 @@ void OLED_Init(void)
 {
 	uint32_t i, j;
 	
-	for (i = 0; i < 1000; i++)			//上电延时
+	for (i = 0; i < 5000; i++)			//上电延时(约50ms)
 	{
 		for (j = 0; j < 1000; j++);
 	}
