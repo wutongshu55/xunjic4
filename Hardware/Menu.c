@@ -30,9 +30,9 @@ const int16_t Speed_Level_MMS[3] = {300, 480, 700};
 const int16_t Speed_Level_Table[3] = {3000, 5000, 7500};
 
 /* 菜单页数:
- * 0=车速 1=六角菱形环 2=发车 3=标定 4=距离 5=Kp 6=Kd 7=急弯
+ * 0=车速 1=六角菱形环 2=发车 3=标定 4=距离 5=Kp 6=Kd 7=急弯 8=开环/闭环
  * 8=速度环Kp 9=速度环Ki 10=开环/闭环 */
-#define MENU_PAGES 11
+#define MENU_PAGES 9
 
 /* 菜单是否需要重画标签 */
 uint8_t Menu_Inited = 0;
@@ -163,17 +163,7 @@ void Menu_KeyHandler(uint8_t key)
             else           { if (kd < 30.0f) kd += 0.5f; }
             break;
 
-        case 8: /* 速度环 Kp */
-            if (key == 3) { if (Speed_KpS > 0.0f)  Speed_KpS -= 0.5f; }
-            else           { if (Speed_KpS < 30.0f) Speed_KpS += 0.5f; }
-            break;
-
-        case 9: /* 速度环 Ki */
-            if (key == 3) { if (Speed_KiS > 0.0f)  Speed_KiS -= 0.5f; }
-            else           { if (Speed_KiS < 50.0f) Speed_KiS += 0.5f; }
-            break;
-
-        case 10: /* 开环/闭环切换(做 A/B 对比用) */
+        case 8: /* 开环/闭环切换(做 A/B 对比用) */
             if (key != 3)
             {
                 Speed_Loop_En = !Speed_Loop_En;
@@ -286,17 +276,7 @@ void Menu_Display(void)
                 OLED_ShowString(3, 1, "0:off 1:on  ");
                 OLED_ShowString(4, 1, "Zig:         ");
                 break;
-            case 8: /* 速度环 Kp */
-                OLED_ShowString(2, 1, "Spd Kp x10");
-                OLED_ShowString(3, 1, "K3:-  K4:+");
-                OLED_ShowString(4, 1, "Kps:         ");
-                break;
-            case 9: /* 速度环 Ki */
-                OLED_ShowString(2, 1, "Spd Ki x10");
-                OLED_ShowString(3, 1, "K3:-  K4:+");
-                OLED_ShowString(4, 1, "Kis:         ");
-                break;
-            case 10: /* 开环/闭环 */
+            case 8: /* 开环/闭环 */
                 OLED_ShowString(2, 1, "Spd Loop");
                 OLED_ShowString(3, 1, "0:open 1:closed");
                 OLED_ShowString(4, 1, "Loop:        ");
@@ -381,13 +361,7 @@ void Menu_Display(void)
         case 7: /* 急弯 */
             OLED_ShowNum(4, 6, Menu_ZigEn, 1);
             break;
-        case 8: /* 速度环 Kp */
-            OLED_ShowNum(4, 6, (uint32_t)(Speed_KpS * 10.0f + 0.5f), 3);
-            break;
-        case 9: /* 速度环 Ki */
-            OLED_ShowNum(4, 6, (uint32_t)(Speed_KiS * 10.0f + 0.5f), 3);
-            break;
-        case 10: /* 开环/闭环 */
+        case 8: /* 开环/闭环 */
             OLED_ShowNum(4, 7, Speed_Loop_En, 1);
             break;
     }
