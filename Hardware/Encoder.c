@@ -17,19 +17,27 @@
 #define GEAR_RATIO           20   /* 减速比 */
 #define ENCODER_PPR          11   /* 编码器单相每转脉冲数, 按实际修改 */
 
-/* 编码器接法(重要):
- *   1 = A/B 两相都接 —— TI12 四倍频, 正常用法【默认】
- *   0 = 只接了 A 相 —— TI1 两倍频, 靠 TI2 电平判方向(应急方案)
- * 只接一相时如果还用 TI12, 计数器永远不增(或乱跳), 表现为"测速恒 0"。
- */
-#define ENCODER_AB_MODE      1
+/* =====================================================================
+ *  测速方式选择(最重要, 决定能不能测到速度):
+ *
+ *  ENCODER_MODE = 1  【单相计数】只用 TI1 外部时钟, 一根信号线就测速
+ *     适用: 编码器只有 A 相输出(很多霍尔编码器只有单相),
+ *           或 A/B 里有一根没接/断线。
+ *     每转计数 = PPR * GR (无 4 倍频)
+ *     缺点: 不分辨方向(后退也计为正), 对循迹不倒车没有影响。
+ *
+ *  ENCODER_MODE = 0  【正交解码】TI12 四倍频, 需要 A/B 两相都接
+ *     每转计数 = PPR * 4 * GR
+ *     优点: 能分辨方向; 缺点: 少一相就永远测不到。
+ * ===================================================================== */
+#define ENCODER_MODE         1
 
-#if (ENCODER_AB_MODE == 1)
-  #define ENC_MULT     4
-  #define ENC_TIM_MODE TIM_EncoderMode_TI12
+#if (ENCODER_MODE == 1)
+  #define ENC_MULT          1
+  #define ENC_TIM_MODE      TIM_SlaveMode_External1
 #else
-  #define ENC_MULT     2
-  #define ENC_TIM_MODE TIM_EncoderMode_TI1
+  #define ENC_MULT          4
+  #define ENC_TIM_MODE      TIM_EncoderMode_TI12
 #endif
 
 #define COUNTS_PER_REV       (ENCODER_PPR * ENC_MULT * GEAR_RATIO)
@@ -56,7 +64,7 @@ static float   s_flt_r = 0.0f;
 
 void Encoder_Init(void)
 {
-    /* 左编码器: PA0(TIM2_CH1) / PA1(TIM2_CH2) */
+    /* 左编码器: PA0(TIM2_CH1) —— 单相计数只用 CH1 */
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
 
@@ -77,15 +85,28 @@ void Encoder_Init(void)
 
     TIM_ICInitTypeDef TIM_ICInitStructure;
     TIM_ICStructInit(&TIM_ICInitStructure);
-    TIM_ICInitStructure.TIM_ICFilter = 0x0F;
-    TIM_ICInit(TIM2, &TIM_ICInitStructure);
+    TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
+    TIM_ICInitStructure.TIM_ICPolarity  = TIM_ICPolarity_Rising;
+    TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
+    TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
+    TIM_ICInitStructure.TIM_ICFilter    = 0x0F;
 
-    TIM_EncoderInterfaceConfig(TIM2, ENC_TIM_MODE,
+#if (ENCODER_MODE == 1)
+    /* 单相计数: 每个 TI1 上升沿 CNT++ (外部时钟模式 1) */
+    TIM_ICInit(TIM2, &TIM_ICInitStructure);
+    TIM_SelectInputTrigger(TIM2, TIM_TS_TI1FP1);
+    TIM_SelectSlaveMode(TIM2, TIM_SlaveMode_External1);
+    TIM_SelectMasterSlaveMode(TIM2, TIM_MasterSlaveMode_Enable);
+#else
+    /* 正交解码: A/B 两相 */
+    TIM_ICInit(TIM2, &TIM_ICInitStructure);
+    TIM_EncoderInterfaceConfig(TIM2, TIM_EncoderMode_TI12,
                                TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
+#endif
     TIM_SetCounter(TIM2, 0);
     TIM_Cmd(TIM2, ENABLE);
 
-    /* 右编码器: PB6(TIM4_CH1) / PB7(TIM4_CH2) */
+    /* 右编码器: PB6(TIM4_CH1) —— 单相计数只用 CH1 */
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
 
@@ -98,11 +119,22 @@ void Encoder_Init(void)
     TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStructure);
 
     TIM_ICStructInit(&TIM_ICInitStructure);
-    TIM_ICInitStructure.TIM_ICFilter = 0x0F;
-    TIM_ICInit(TIM4, &TIM_ICInitStructure);
+    TIM_ICInitStructure.TIM_Channel     = TIM_Channel_1;
+    TIM_ICInitStructure.TIM_ICPolarity  = TIM_ICPolarity_Rising;
+    TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
+    TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
+    TIM_ICInitStructure.TIM_ICFilter    = 0x0F;
 
-    TIM_EncoderInterfaceConfig(TIM4, ENC_TIM_MODE,
+#if (ENCODER_MODE == 1)
+    TIM_ICInit(TIM4, &TIM_ICInitStructure);
+    TIM_SelectInputTrigger(TIM4, TIM_TS_TI1FP1);
+    TIM_SelectSlaveMode(TIM4, TIM_SlaveMode_External1);
+    TIM_SelectMasterSlaveMode(TIM4, TIM_MasterSlaveMode_Enable);
+#else
+    TIM_ICInit(TIM4, &TIM_ICInitStructure);
+    TIM_EncoderInterfaceConfig(TIM4, TIM_EncoderMode_TI12,
                                TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
+#endif
     TIM_SetCounter(TIM4, 0);
     TIM_Cmd(TIM4, ENABLE);
 }
