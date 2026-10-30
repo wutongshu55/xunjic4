@@ -17,6 +17,7 @@ build.log
 
 # Keil 用户配置（含本地路径）
 Project.uvguix.*
+Project.uvoptx
 *.uvguix.*
 
 # 调试配置
