@@ -248,15 +248,19 @@ void Menu_Display(void)
                     OLED_ShowString(4, 1, "SAT  K3:CLR");
                 }
                 break;
-            case 5: /* Kp */
-                OLED_ShowString(2, 1, "Kp x10");
-                OLED_ShowString(3, 1, "K3:-  K4:+   ");
-                OLED_ShowString(4, 1, "Kp:          ");
+            case 5: /* Kp: 顺带显示实时 E / D, 一边拧一边看 */
+                OLED_ShowString(2, 1, "Kp x10  K3-/K4+");
+                OLED_ShowString(3, 1, "E");
+                OLED_ShowString(3, 7, "D");
+                OLED_ShowString(4, 1, "Kp:");
+                OLED_ShowString(4, 9, "Dl");
                 break;
-            case 6: /* Kd */
-                OLED_ShowString(2, 1, "Kd x10");
-                OLED_ShowString(3, 1, "K3:-  K4:+   ");
-                OLED_ShowString(4, 1, "Kd:          ");
+            case 6: /* Kd: 同上 */
+                OLED_ShowString(2, 1, "Kd x10  K3-/K4+");
+                OLED_ShowString(3, 1, "E");
+                OLED_ShowString(3, 7, "D");
+                OLED_ShowString(4, 1, "Kd:");
+                OLED_ShowString(4, 9, "Dl");
                 break;
             case 7: /* 急弯保持 */
                 OLED_ShowString(2, 1, "Sharp");
@@ -335,11 +339,17 @@ void Menu_Display(void)
                 OLED_ShowNum(4, 5, ADC_SatFlag, 2);      /* 饱和通道位图 */
             }
             break;
-        case 5: /* Kp */
+        case 5: /* Kp: 误差 / 微分项 / 参数 / 输出差速 */
+            OLED_ShowSignedNum(3, 2, (int32_t)Error, 4);
+            OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
             OLED_ShowNum(4, 5, (uint32_t)(kp * 10.0f + 0.5f), 3);
+            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
             break;
-        case 6: /* Kd */
+        case 6: /* Kd: 同上 */
+            OLED_ShowSignedNum(3, 2, (int32_t)Error, 4);
+            OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
             OLED_ShowNum(4, 5, (uint32_t)(kd * 10.0f + 0.5f), 3);
+            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
             break;
         case 7: /* 急弯 */
             OLED_ShowNum(4, 6, Menu_ZigEn, 1);
