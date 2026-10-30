@@ -1,4 +1,4 @@
-#include "Common_headfile.h"
+﻿#include "Common_headfile.h"
 
 /* 减速比20, 轮子外径48mm
  * 周长 = 48 * PI = 150.80mm
@@ -16,7 +16,23 @@
 #define WHEEL_CIRCUMFERENCE  (WHEEL_DIAMETER_MM * 3.14159265f)  /* 约150.80mm */
 #define GEAR_RATIO           20   /* 减速比 */
 #define ENCODER_PPR          11   /* 编码器单相每转脉冲数, 按实际修改 */
-#define COUNTS_PER_REV       (ENCODER_PPR * 4 * GEAR_RATIO)  /* 4倍频, 一圈计数 */
+
+/* 编码器接法(重要):
+ *   1 = A/B 两相都接 —— TI12 四倍频, 正常用法【默认】
+ *   0 = 只接了 A 相 —— TI1 两倍频, 靠 TI2 电平判方向(应急方案)
+ * 只接一相时如果还用 TI12, 计数器永远不增(或乱跳), 表现为"测速恒 0"。
+ */
+#define ENCODER_AB_MODE      1
+
+#if (ENCODER_AB_MODE == 1)
+  #define ENC_MULT     4
+  #define ENC_TIM_MODE TIM_EncoderMode_TI12
+#else
+  #define ENC_MULT     2
+  #define ENC_TIM_MODE TIM_EncoderMode_TI1
+#endif
+
+#define COUNTS_PER_REV       (ENCODER_PPR * ENC_MULT * GEAR_RATIO)
 
 #define SPEED_WIN_MS         20   /* 测速窗口(ms), 必须是 5ms 的整数倍 */
 #define SPEED_LPF            0.50f /* 测速一阶低通系数(0=不滤波, 1=不更新) */
@@ -45,7 +61,10 @@ void Encoder_Init(void)
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
 
     GPIO_InitTypeDef GPIO_InitStructure;
-    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_IN_FLOATING;
+    /* 上拉输入: 很多循迹板/编码器的输出是集电极开路(LM393 是比较器),
+     * 浮空输入没有上拉电阻就一直是 0 或乱跳 -> 计数恒 0。
+     * 推挽输出的编码器用上拉输入也完全没问题。 */
+    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_IPU;
     GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
@@ -61,7 +80,7 @@ void Encoder_Init(void)
     TIM_ICInitStructure.TIM_ICFilter = 0x0F;
     TIM_ICInit(TIM2, &TIM_ICInitStructure);
 
-    TIM_EncoderInterfaceConfig(TIM2, TIM_EncoderMode_TI12,
+    TIM_EncoderInterfaceConfig(TIM2, ENC_TIM_MODE,
                                TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
     TIM_SetCounter(TIM2, 0);
     TIM_Cmd(TIM2, ENABLE);
@@ -82,7 +101,7 @@ void Encoder_Init(void)
     TIM_ICInitStructure.TIM_ICFilter = 0x0F;
     TIM_ICInit(TIM4, &TIM_ICInitStructure);
 
-    TIM_EncoderInterfaceConfig(TIM4, TIM_EncoderMode_TI12,
+    TIM_EncoderInterfaceConfig(TIM4, ENC_TIM_MODE,
                                TIM_ICPolarity_Rising, TIM_ICPolarity_Rising);
     TIM_SetCounter(TIM4, 0);
     TIM_Cmd(TIM4, ENABLE);
