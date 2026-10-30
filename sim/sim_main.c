@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 电磁循迹算法主机端仿真验证 —— 复合(2横+2竖)电感布局版
  *
  * 传感器分工(与实物一致):
@@ -127,6 +127,7 @@ static void Reset_State(void)
     Menu_CrossCount = 0; Menu_DoneLaps = 0;
     Menu_Running = 1;
     H_Base = 0.0f; V_Base = 0.0f;
+    Track_StateMachine_Reset();
     ADC_MAX[0] = ADC_MAX[1] = ADC_MAX[2] = ADC_MAX[3] = SIM_MAX;
     ADC_MIN[0] = ADC_MIN[1] = ADC_MIN[2] = ADC_MIN[3] = SIM_MIN;
     ADC_Peak_Reset();
@@ -416,7 +417,7 @@ static void S7_Speed_Schedule(void)
     float k = 1.0f;
 
     printf("\n[S7] 弯道降速调度\n");
-    Speed_Basic = 5000;
+    Speed_Basic = 700;      /* mm/s */
     Reset_State();
     for (i = 0; i < 20; i++) { STRAIGHT(k); }
     printf("  直线   Error=%+6.2f -> 速度 %d\n", Error, PID_Speed_Schedule(Speed_Basic));
@@ -427,7 +428,7 @@ static void S7_Speed_Schedule(void)
         {
             int16_t curve = PID_Speed_Schedule(Speed_Basic);
             CHECK(curve < straight, "弯道应降速: %d vs %d", curve, straight);
-            CHECK(curve >= 2000, "弯道降速不能太狠(会停住): %d", curve);
+            CHECK(curve >= 280, "弯道降速不能太狠(会停住): %d", curve);
         }
     }
 }
@@ -474,6 +475,84 @@ static void S8_Peak_And_Saturation(void)
     CHECK(ADC_Peak[3] == 0 && ADC_Peak[2] == 0, "清零后峰值应为 0");
 }
 
+/* ================= S9 赛道状态机 ================= */
+/* 连续跑 n 个 5ms 周期 */
+static void Cycle(int n, int16_t nL, int16_t nML, int16_t nMR, int16_t nR)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        Feed(nL, nML, nMR, nR, 1.0f);
+        PID_Sharp_Check();
+        PID_Calculate();
+        Track_Judge();
+    }
+}
+
+static void S9_Track_State(void)
+{
+    int i;
+
+    printf("\n[S9] 赛道状态机分类\n");
+
+    Reset_State();
+    Cycle(60, 55, 2, 2, 55);
+    printf("  直道   -> 状态 %d (期望 0)  系数 %.2f\n", Track_State, Track_Speed_Ratio);
+    CHECK(Track_State == TRK_STRAIGHT, "直道应为 0, 实际 %d", Track_State);
+
+    Reset_State();
+    Cycle(60, 75, 2, 2, 35);
+    printf("  小弯   -> 状态 %d (期望 1)\n", Track_State);
+    CHECK(Track_State == TRK_CURVE, "小弯应为 1, 实际 %d", Track_State);
+
+    /* 半圆弧: 误差稳在 45~80 且持续 400ms 以上 */
+    Reset_State();
+    Cycle(200, 70, 3, 3, 20);
+    printf("  半圆弧 -> 状态 %d (期望 6)  E=%+.1f 系数 %.2f\n",
+           Track_State, Error, Track_Speed_Ratio);
+    CHECK(Track_State == TRK_ARC, "半圆弧应为 6, 实际 %d", Track_State);
+    CHECK(Track_Speed_Ratio < 0.95f, "圆弧应略降速");
+
+    /* 直角弯: 误差直接顶到 90 以上 */
+    Reset_State();
+    Cycle(60, 95, 5, 5, 2);
+    printf("  直角弯 -> 状态 %d (期望 2 或 1)\n", Track_State);
+    CHECK((Track_State == TRK_SHARP) || (Track_State == TRK_CURVE),
+          "直角弯判据异常: %d", Track_State);
+
+    /* S弯/两条很近的直道: 每 400ms 换向 */
+    Reset_State();
+    Cycle(80, 70, 3, 3, 20);
+    Cycle(80, 20, 3, 3, 70);
+    Cycle(80, 70, 3, 3, 20);
+    printf("  S弯    -> 状态 %d (期望 3) 系数 %.2f D倍数 %.2f\n",
+           Track_State, Track_Speed_Ratio, Track_Kd_Gain);
+    CHECK(Track_State == TRK_S_CURVE, "S弯应为 3, 实际 %d", Track_State);
+    CHECK(Track_Kd_Gain > 1.2f, "S弯应加大 D 阻尼: %.2f", Track_Kd_Gain);
+
+    /* 锯齿: 每 60ms 换向 */
+    Reset_State();
+    for (i = 0; i < 3; i++)
+    {
+        Cycle(12, 75, 3, 3, 15);
+        Cycle(12, 15, 3, 3, 75);
+    }
+    printf("  锯齿   -> 状态 %d (期望 7) 系数 %.2f D倍数 %.2f\n",
+           Track_State, Track_Speed_Ratio, Track_Kd_Gain);
+    CHECK(Track_State == TRK_ZIGZAG, "锯齿应为 7, 实际 %d", Track_State);
+    CHECK(Track_Speed_Ratio < 0.60f, "锯齿应明显降速: %.2f", Track_Speed_Ratio);
+
+    /* 十字 */
+    Reset_State();
+    Cycle(60, 50, 88, 88, 50);
+    printf("  十字   -> 状态 %d (期望 4)\n", Track_State);
+    CHECK(Track_State == TRK_CROSS, "十字应为 4, 实际 %d", Track_State);
+
+    Track_StateMachine_Reset();
+    CHECK(Track_State == TRK_STRAIGHT, "复位后应回到直道");
+    CHECK(Track_Kd_Gain == 1.0f, "复位后 D 倍数应回到 1.0");
+}
+
 int main(void)
 {
     printf("==============================================\n");
@@ -490,6 +569,7 @@ int main(void)
     S6_Sharp_Turn();
     S7_Speed_Schedule();
     S8_Peak_And_Saturation();
+    S9_Track_State();
 
     printf("\n==============================================\n");
     printf(" checks=%d  failures=%d  -> %s\n", g_checks, g_fail, g_fail ? "FAIL" : "ALL PASS");

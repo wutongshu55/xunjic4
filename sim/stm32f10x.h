@@ -21,6 +21,7 @@
 /* GPIO */
 #define GPIO_Mode_AIN      0x00
 #define GPIO_Mode_IPU      0x08
+#define GPIO_Mode_Out_PP   0x10
 #define GPIO_Speed_50MHz   0x03
 #define GPIO_Pin_0         0x0001
 #define GPIO_Pin_1         0x0002
@@ -93,6 +94,9 @@ void RCC_AHBPeriphClockCmd(uint32_t a, uint32_t b);
 void RCC_ADCCLKConfig(uint32_t a);
 void GPIO_Init(GPIO_TypeDef *p, GPIO_InitTypeDef *s);
 uint8_t GPIO_ReadInputDataBit(GPIO_TypeDef *p, uint16_t pin);
+void GPIO_WriteBit(GPIO_TypeDef *p, uint16_t pin, uint8_t v);
+void GPIO_ResetBits(GPIO_TypeDef *p, uint16_t pin);
+void GPIO_SetBits(GPIO_TypeDef *p, uint16_t pin);
 void ADC_RegularChannelConfig(ADC_TypeDef *p, uint8_t ch, uint8_t rank, uint8_t st);
 void ADC_Init(ADC_TypeDef *p, ADC_InitTypeDef *s);
 void ADC_DMACmd(ADC_TypeDef *p, uint32_t c);

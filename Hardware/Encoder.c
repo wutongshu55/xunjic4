@@ -1,11 +1,15 @@
 #include "Common_headfile.h"
 
 /* 减速比20, 轮子外径48mm
- * 周长 = 48 * PI = 150.80mm = 0.15080m
- * 编码器一圈脉冲数(假设11PPR单相) * 减速比20 = 220脉冲/圈(4倍频后880)
- * 这里用4倍频计数, 实际一圈计数 = 编码器线数 * 4 * 减速比
- * 若编码器为11PPR: 一圈 = 11*4*20 = 880
- * 速度(mm/s) = (计数差 * 周长mm) / (一圈计数 * 采样周期s)
+ * 周长 = 48 * PI = 150.80mm
+ * 编码器一圈计数(4倍频后) = 线数 * 4 * 减速比 = 11*4*20 = 880
+ *
+ * 测速窗口说明(重要):
+ *   若每 5ms 算一次速度, 1 个计数 = 150.8/880/0.005 = 34.3 mm/s,
+ *   300mm/s 时只有 9 个计数, 量化误差 >10%, 速度环会抖。
+ *   所以这里把计数累加到 20ms 再算: 1 个计数 = 8.6 mm/s,
+ *   300mm/s 时有 35 个计数, 量化误差约 3%, 够用了。
+ *   20ms 对应 50Hz 速度环带宽, 对直流电机(机械时间常数几十 ms)足够。
  */
 
 #define WHEEL_DIAMETER_MM   48.0f
@@ -14,8 +18,11 @@
 #define ENCODER_PPR          11   /* 编码器单相每转脉冲数, 按实际修改 */
 #define COUNTS_PER_REV       (ENCODER_PPR * 4 * GEAR_RATIO)  /* 4倍频, 一圈计数 */
 
-volatile int16_t  Encoder_L_Count = 0;   /* 左编码器累计计数(本采样周期) */
-volatile int16_t  Encoder_R_Count = 0;   /* 右编码器累计计数(本采样周期) */
+#define SPEED_WIN_MS         20   /* 测速窗口(ms), 必须是 5ms 的整数倍 */
+#define SPEED_LPF            0.50f /* 测速一阶低通系数(0=不滤波, 1=不更新) */
+
+volatile int16_t  Encoder_L_Count = 0;   /* 左编码器计数(本次5ms) */
+volatile int16_t  Encoder_R_Count = 0;   /* 右编码器计数(本次5ms) */
 volatile int32_t  Encoder_L_Total = 0;  /* 左编码器总累计(用于里程) */
 volatile int32_t  Encoder_R_Total = 0;  /* 右编码器总累计 */
 volatile int32_t  Speed_L_RPM = 0;      /* 左轮转速 RPM */
@@ -23,6 +30,13 @@ volatile int32_t  Speed_R_RPM = 0;      /* 右轮转速 RPM */
 volatile int32_t  Speed_L_mms = 0;      /* 左轮速度 mm/s */
 volatile int32_t  Speed_R_mms = 0;      /* 右轮速度 mm/s */
 volatile int32_t  Speed_Avg_mms = 0;   /* 平均速度 mm/s */
+
+/* 20ms 窗口累加 */
+static uint8_t s_div   = 0;
+static int32_t s_acc_l = 0;
+static int32_t s_acc_r = 0;
+static float   s_flt_l = 0.0f;
+static float   s_flt_r = 0.0f;
 
 void Encoder_Init(void)
 {
@@ -74,7 +88,8 @@ void Encoder_Init(void)
     TIM_Cmd(TIM4, ENABLE);
 }
 
-/* 在定时中断中调用, dt为采样周期(秒) */
+/* 在 TIM1 的 5ms 中断中调用, dt = 调用周期(秒) = 0.005
+ * 每 SPEED_WIN_MS 才真正算一次速度, 中间只累加计数。 */
 void Encoder_Update(float dt)
 {
     int16_t cnt_l, cnt_r;
@@ -85,19 +100,38 @@ void Encoder_Update(float dt)
     TIM_SetCounter(TIM2, 0);
     TIM_SetCounter(TIM4, 0);
 
-    Encoder_L_Count  = cnt_l;
-    Encoder_R_Count  = cnt_r;
+    Encoder_L_Count = cnt_l;
+    Encoder_R_Count = cnt_r;
     Encoder_L_Total += cnt_l;
     Encoder_R_Total += cnt_r;
 
-    if (dt > 0.001f)
+    s_acc_l += cnt_l;
+    s_acc_r += cnt_r;
+
+    s_div++;
+    if (s_div < (SPEED_WIN_MS / 5)) return;
+    if (dt <= 0.0001f) { s_div = 0; s_acc_l = 0; s_acc_r = 0; return; }
+
     {
-        /* RPM = (计数差 / 一圈计数) * (60 / 采样周期s) */
-        Speed_L_RPM = (int32_t)((float)cnt_l / (float)COUNTS_PER_REV / dt * 60.0f);
-        Speed_R_RPM = (int32_t)((float)cnt_r / (float)COUNTS_PER_REV / dt * 60.0f);
-        /* mm/s = (计数差 / 一圈计数) * 周长mm / 采样周期s */
-        Speed_L_mms = (int32_t)((float)cnt_l / (float)COUNTS_PER_REV * WHEEL_CIRCUMFERENCE / dt);
-        Speed_R_mms = (int32_t)((float)cnt_r / (float)COUNTS_PER_REV * WHEEL_CIRCUMFERENCE / dt);
+        float dt_win = dt * (float)s_div;
+        float mms_l  = ((float)s_acc_l / (float)COUNTS_PER_REV)
+                       * WHEEL_CIRCUMFERENCE / dt_win;
+        float mms_r  = ((float)s_acc_r / (float)COUNTS_PER_REV)
+                       * WHEEL_CIRCUMFERENCE / dt_win;
+
+        /* 一阶低通: 抑制单个窗口的量化跳变, 但会引入约 20ms 滞后 */
+        s_flt_l = s_flt_l + SPEED_LPF * (mms_l - s_flt_l);
+        s_flt_r = s_flt_r + SPEED_LPF * (mms_r - s_flt_r);
+
+        Speed_L_mms = (int32_t)s_flt_l;
+        Speed_R_mms = (int32_t)s_flt_r;
         Speed_Avg_mms = (Speed_L_mms + Speed_R_mms) / 2;
+
+        Speed_L_RPM = (int32_t)((float)Speed_L_mms / WHEEL_CIRCUMFERENCE * 60.0f);
+        Speed_R_RPM = (int32_t)((float)Speed_R_mms / WHEEL_CIRCUMFERENCE * 60.0f);
+
+        s_div   = 0;
+        s_acc_l = 0;
+        s_acc_r = 0;
     }
 }

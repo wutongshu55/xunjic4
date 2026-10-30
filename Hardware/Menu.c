@@ -1,4 +1,4 @@
-#include "Common_headfile.h"
+﻿#include "Common_headfile.h"
 
 /* ===================== 全局运行参数 ===================== */
 /* 是否进入六角菱形环: 0=不进 1=进 */
@@ -23,11 +23,16 @@ uint8_t  Menu_ZigEn       = 1;
 /* 新增: 距离测试页显示原始值还是归一化值 */
 uint8_t  Menu_DistRaw     = 0;
 
-/* 三档车速对应的基础PWM占空比(0~10000) */
+/* 三档车速: 现在给的是【目标速度 mm/s】, 由速度环闭环执行 */
+const int16_t Speed_Level_MMS[3] = {300, 480, 700};
+
+/* 旧的 PWM 开环表, 仅在需要对照时参考 */
 const int16_t Speed_Level_Table[3] = {3000, 5000, 7500};
 
-/* 菜单页数: 0=车速 1=六角菱形环 2=发车 3=标定 4=距离 5=Kp 6=Kd 7=急弯 */
-#define MENU_PAGES 8
+/* 菜单页数:
+ * 0=车速 1=六角菱形环 2=发车 3=标定 4=距离 5=Kp 6=Kd 7=急弯
+ * 8=速度环Kp 9=速度环Ki 10=开环/闭环 */
+#define MENU_PAGES 11
 
 /* 菜单是否需要重画标签 */
 uint8_t Menu_Inited = 0;
@@ -102,6 +107,10 @@ void Menu_KeyHandler(uint8_t key)
                         Menu_DoneLaps   = 0;
                         Menu_CrossCount = 0;
                     }
+
+                    /* 发车前把两个闭环的状态清干净 */
+                    Speed_Loop_Reset();          /* 速度环积分 */
+                    Track_StateMachine_Reset();  /* 赛道状态机 */
                     Menu_Running = 1;   /* 发车 */
                     Beep_On(200);
                 }
@@ -145,6 +154,25 @@ void Menu_KeyHandler(uint8_t key)
             else           { if (kd < 30.0f) kd += 0.5f; }
             break;
 
+        case 8: /* 速度环 Kp */
+            if (key == 3) { if (Speed_KpS > 0.0f)  Speed_KpS -= 0.5f; }
+            else           { if (Speed_KpS < 30.0f) Speed_KpS += 0.5f; }
+            break;
+
+        case 9: /* 速度环 Ki */
+            if (key == 3) { if (Speed_KiS > 0.0f)  Speed_KiS -= 0.5f; }
+            else           { if (Speed_KiS < 50.0f) Speed_KiS += 0.5f; }
+            break;
+
+        case 10: /* 开环/闭环切换(做 A/B 对比用) */
+            if (key != 3)
+            {
+                Speed_Loop_En = !Speed_Loop_En;
+                Speed_Loop_Reset();
+                Beep_On(40);
+            }
+            break;
+
         default: /* 通用整型参数增减 */
             p  = Menu_GetParam(Menu_Page);
             mx = Menu_GetMax(Menu_Page);
@@ -177,7 +205,7 @@ void Menu_Display(void)
             case 0: /* 车速 */
                 OLED_ShowString(2, 1, "Speed");
                 OLED_ShowString(3, 1, "0:Sl 1:Mi 2:Fa");
-                OLED_ShowString(4, 1, "Spd:  PWM    ");
+                OLED_ShowString(4, 1, "Spd: mm/s    ");
                 break;
             case 1: /* 六角菱形环 */
                 OLED_ShowString(2, 1, "HexDia");
@@ -235,6 +263,21 @@ void Menu_Display(void)
                 OLED_ShowString(3, 1, "0:off 1:on  ");
                 OLED_ShowString(4, 1, "Zig:         ");
                 break;
+            case 8: /* 速度环 Kp */
+                OLED_ShowString(2, 1, "Spd Kp x10");
+                OLED_ShowString(3, 1, "K3:-  K4:+");
+                OLED_ShowString(4, 1, "Kps:         ");
+                break;
+            case 9: /* 速度环 Ki */
+                OLED_ShowString(2, 1, "Spd Ki x10");
+                OLED_ShowString(3, 1, "K3:-  K4:+");
+                OLED_ShowString(4, 1, "Kis:         ");
+                break;
+            case 10: /* 开环/闭环 */
+                OLED_ShowString(2, 1, "Spd Loop");
+                OLED_ShowString(3, 1, "0:open 1:closed");
+                OLED_ShowString(4, 1, "Loop:        ");
+                break;
         }
         Menu_Inited = 1;
     }
@@ -242,9 +285,9 @@ void Menu_Display(void)
     /* 只更新数值 */
     switch (Menu_Page)
     {
-        case 0: /* 车速 */
+        case 0: /* 车速: 显示档位与目标 mm/s */
             OLED_ShowNum(4, 6, Menu_SpeedLevel, 1);
-            OLED_ShowNum(4, 12, Speed_Level_Table[Menu_SpeedLevel], 4);
+            OLED_ShowNum(4, 11, Speed_Level_MMS[Menu_SpeedLevel], 4);
             break;
         case 1: /* 六角菱形环 */
             OLED_ShowNum(4, 6, Menu_HexDiaEn, 1);
@@ -301,38 +344,65 @@ void Menu_Display(void)
         case 7: /* 急弯 */
             OLED_ShowNum(4, 6, Menu_ZigEn, 1);
             break;
+        case 8: /* 速度环 Kp */
+            OLED_ShowNum(4, 6, (uint32_t)(Speed_KpS * 10.0f + 0.5f), 3);
+            break;
+        case 9: /* 速度环 Ki */
+            OLED_ShowNum(4, 6, (uint32_t)(Speed_KiS * 10.0f + 0.5f), 3);
+            break;
+        case 10: /* 开环/闭环 */
+            OLED_ShowNum(4, 7, Speed_Loop_En, 1);
+            break;
     }
 }
 
 /* 运行显示页是否需要重画标签 */
 uint8_t Menu_RunInited = 0;
 
-/* 运行时显示页(发车后) - 不清屏, 只更新数据位置 */
+/* 运行时显示页(发车后) - 不清屏, 只更新数据位置
+ *
+ * 布局(16 列 x 4 行):
+ *   L 55 ML 02 MR 02     四路电感归一化值(横置 L/R, 竖置 ML/MR)
+ *   R 55 E+0012 S45      右横置 / 循迹误差 / 综合场强
+ *   T300 A296 L1/2       左轮目标速度 / 平均实际速度 / 已完成圈数
+ *   S2 X03 D4800         赛道状态 / 十字计数 / 左轮占空比
+ */
 void Menu_RunDisplay(void)
 {
     if (!Menu_RunInited)
     {
         OLED_Clear();
-        OLED_ShowString(1, 1,  "L   ML   MR  ");
-        OLED_ShowString(2, 1,  "R    E    ");
-        OLED_ShowString(3, 1,  "V    S    L/");
-        OLED_ShowString(4, 1,  "Crs  Hd   ");
+        OLED_ShowString(1, 1,  "L");
+        OLED_ShowString(1, 5,  "ML");
+        OLED_ShowString(1, 10, "MR");
+        OLED_ShowString(2, 1,  "R");
+        OLED_ShowString(2, 5,  "E");
+        OLED_ShowString(2, 11, "S");
+        OLED_ShowString(3, 1,  "T");
+        OLED_ShowString(3, 6,  "A");
+        OLED_ShowString(3, 11, "L");
+        OLED_ShowString(3, 13, "/");
+        OLED_ShowString(4, 1,  "S");
+        OLED_ShowString(4, 4,  "X");
+        OLED_ShowString(4, 8,  "D");
         Menu_RunInited = 1;
     }
-    /* 第1行: 四路电感归一化值 */
-    OLED_ShowNum(1, 2, ADC_L, 3);
-    OLED_ShowNum(1, 8, ADC_ML, 3);
-    OLED_ShowNum(1, 14, ADC_MR, 2);
-    /* 第2行: 右电感 + 循迹误差 */
-    OLED_ShowNum(2, 2, ADC_R, 3);
-    OLED_ShowSignedNum(2, 9, (int32_t)Error, 4);
-    /* 第3行: 速度 + 场强 + 已完成圈数/目标圈数 */
-    OLED_ShowNum(3, 2, Speed_Avg_mms, 4);
-    OLED_ShowNum(3, 7, ADC_Strength, 3);
-    OLED_ShowNum(3, 13, Menu_DoneLaps, 1);
+
+    /* 第1行: 四路电感归一化值(0~100) */
+    OLED_ShowNum(1, 2,  ADC_L,  3);
+    OLED_ShowNum(1, 7,  ADC_ML, 3);
+    OLED_ShowNum(1, 12, ADC_MR, 3);
+    /* 第2行: 右横置 + 循迹误差 + 综合场强 */
+    OLED_ShowNum(2, 2,  ADC_R, 3);
+    OLED_ShowSignedNum(2, 6, (int32_t)Error, 4);
+    OLED_ShowNum(2, 12, ADC_Strength, 2);
+    /* 第3行: 左轮目标速度 / 平均实际速度 / 圈数进度 */
+    OLED_ShowNum(3, 2,  Speed_Target_L, 3);
+    OLED_ShowNum(3, 7,  Speed_Avg_mms, 3);
+    OLED_ShowNum(3, 12, Menu_DoneLaps, 1);
     OLED_ShowNum(3, 14, Menu_TargetLaps, 1);
-    /* 第4行: 十字计数 + 六角菱形环状态 + 实际基础PWM */
-    OLED_ShowNum(4, 4, Menu_CrossCount, 2);
-    OLED_ShowNum(4, 8, HexDia_Flag, 1);
-    OLED_ShowNum(4, 11, Speed_Basic, 4);
+    /* 第4行: 赛道状态 / 十字计数 / 左轮占空比 */
+    OLED_ShowNum(4, 2,  Track_State, 1);
+    OLED_ShowNum(4, 5,  Menu_CrossCount, 2);
+    OLED_ShowNum(4, 9,  Duty_L, 4);
 }

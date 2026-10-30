@@ -178,8 +178,8 @@ void TIM1_UP_IRQHandler(void)
         /* 4. 运行控制 */
         if (Menu_Running == 1)
         {
-            /* 基础速度先定下来, 后面调度用 */
-            Speed_Basic = Speed_Level_Table[Menu_SpeedLevel];
+            /* 基础速度先定下来(单位 mm/s), 后面调度用 */
+            Speed_Basic = Speed_Level_MMS[Menu_SpeedLevel];
 
             /* 4.1 异常检测: 丢线 / 急弯(锯齿线、直角弯) */
             PID_LostLine_Check();
@@ -207,12 +207,14 @@ void TIM1_UP_IRQHandler(void)
         {
             /* 完成停车 */
             Motor_Out(0, 0);
+            Speed_Loop_Reset();
             Speed_Basic = 0;
         }
         else
         {
-            /* 待发车, 电机停止 */
+            /* 待发车, 电机停止(顺带清速度环积分, 避免起步冲一下) */
             Motor_Out(0, 0);
+            Speed_Loop_Reset();
         }
 
         TIM_ClearITPendingBit(TIM1, TIM_IT_Update);

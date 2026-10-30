@@ -1,4 +1,4 @@
-#include "Common_headfile.h"
+﻿#include "Common_headfile.h"
 
 /* ============================================================
  *  赛道元素识别 —— 复合(2 横 + 2 竖)电感布局版
@@ -350,6 +350,193 @@ void Lap_Judge(void)
 {
 }
 
+/* ============================================================
+ *  赛道状态机
+ *
+ *  0=直道  1=普通弯  2=直角弯  3=近距离双直道/S弯
+ *  4=十字  5=六角菱形环  6=半圆弧  7=锯齿
+ *
+ *  为什么要单独分类, 而不是只看误差大小:
+ *    误差只告诉你"偏了多少", 不告诉你"接下来会怎样"。
+ *    同样 |E|=50, 在半个圆弧上应该稳住方向小油门过,
+ *    在锯齿上却必须加大阻尼并且允许方向翻转。
+ *    所以速度系数和 D 增益按【赛道类型】给, 而不是只按误差给。
+ *
+ *  切换带滞回: 新状态连续确认 2 个周期(10ms)才切,
+ *  S弯/锯齿一旦进入至少保持 300ms, 防止在临界点来回抖。
+ * ============================================================ */
+
+#define FLIP_ERR_MIN       20.0f   /* 方向反转算数的误差下限 */
+#define FLIP_FAST_MS       250     /* 两次反转间隔 < 250ms 算"快速抖动" */
+#define FLIP_SLOW_MS       900     /* 两次反转间隔 < 900ms 算"慢速换向" */
+#define FLIP_FAST_CNT      3       /* 快速反转 3 次 -> 锯齿 */
+#define FLIP_SLOW_CNT      2       /* 慢速反转 2 次 -> S弯/双直道 */
+#define FLIP_FORGET_MS     1500    /* 超过 1.5s 没反转, 计数清零 */
+#define CURVE_STATE_TH     22.0f   /* 进入"普通弯"的误差门槛 */
+#define ARC_ERR_MIN        40.0f   /* 半圆弧: 误差要持续大于此值 */
+#define ARC_MAX_ERR       80.0f    /* 超过这个更像直角弯, 不算圆弧 */
+#define ARC_HOLD_MS        400     /* 半圆弧: 持续 400ms 才认定 */
+#define STATE_CONFIRM      2       /* 新状态确认周期数(5ms/次) */
+#define STATE_MIN_MS       300     /* S弯/锯齿的最小保持时间 */
+
+uint8_t  Track_State = TRK_STRAIGHT;
+float    Track_Kd_Gain = 1.0f;
+uint16_t Track_State_Ms = 0;      /* 当前状态已持续的时间(ms) */
+
+static uint8_t  s_cand = TRK_STRAIGHT;   /* 候选状态 */
+static uint8_t  s_cand_cnt = 0;
+static uint8_t  s_flip_fast = 0;
+static uint8_t  s_flip_slow = 0;
+static uint16_t s_since_flip = 0;
+static uint16_t s_arc_ms = 0;
+static int8_t   s_last_sign = 0;
+static uint16_t s_quiet_ms  = 0;
+/* 复位状态机(发车时调用, 避免带上一轮的残留状态) */
+void Track_StateMachine_Reset(void)
+{
+    Track_State       = TRK_STRAIGHT;
+    Track_State_Ms    = 0;
+    Track_Speed_Ratio = 1.0f;
+    Track_Kd_Gain     = 1.0f;
+    s_cand      = TRK_STRAIGHT;
+    s_cand_cnt  = 0;
+    s_flip_fast = 0;
+    s_flip_slow = 0;
+    s_since_flip = 0;
+    s_arc_ms    = 0;
+    s_last_sign = 0;
+    s_quiet_ms  = 0;
+}
+
+/* 把状态翻译成"速度系数 + D 增益" */
+static void Track_Apply(uint8_t st)
+{
+    float ratio = 1.0f;
+    float kd_g  = 1.0f;
+
+    switch (st)
+    {
+        case TRK_STRAIGHT: ratio = 1.00f; kd_g = 1.0f; break;
+        case TRK_CURVE:    ratio = 1.00f; kd_g = 1.0f; break;  /* 降速由误差调度负责 */
+        case TRK_ARC:      ratio = 0.90f; kd_g = 1.1f; break;  /* 半圆弧: 稳住, 别猛打 */
+        case TRK_S_CURVE:  ratio = 0.65f; kd_g = 1.6f; break;  /* 双直道/S弯: 加阻尼防超调 */
+        case TRK_ZIGZAG:   ratio = 0.55f; kd_g = 1.8f; break;  /* 锯齿: 更要阻尼 */
+        case TRK_SHARP:    ratio = 1.00f; kd_g = 1.0f; break;  /* 急弯自己的 0.55 系数已生效 */
+        case TRK_CROSS:    ratio = 1.00f; kd_g = 1.0f; break;
+        case TRK_HEXDIA:   ratio = 1.00f; kd_g = 1.0f; break;
+        default:           ratio = 1.00f; kd_g = 1.0f; break;
+    }
+
+    /* 十字/环/急弯自身已经给过速度系数, 这里不重复乘, 只更新 D 增益 */
+    if ((st != TRK_CROSS) && (st != TRK_HEXDIA) && (st != TRK_SHARP))
+    {
+        Track_Speed_Ratio = ratio;
+    }
+    Track_Kd_Gain = kd_g;
+}
+
+static void Track_Classify(void)
+{
+    float   a  = fabsf(Error);
+    int8_t  sg = (Error >  1.0f) ?  1 : ((Error < -1.0f) ? -1 : 0);
+    uint8_t want;
+    uint8_t holdable;
+
+    /* ---- 方向反转统计: 区分 S弯(慢换向) 与 锯齿(快抖动) ---- */
+    s_since_flip += 5;
+    if (s_since_flip > FLIP_FORGET_MS)
+    {
+        s_flip_fast = 0;
+        s_flip_slow = 0;
+        s_since_flip = 0;
+    }
+
+    if ((sg != 0) && (s_last_sign != 0) && (sg != s_last_sign) && (a > FLIP_ERR_MIN))
+    {
+        if      (s_since_flip < FLIP_FAST_MS) s_flip_fast++;
+        else if (s_since_flip < FLIP_SLOW_MS) s_flip_slow++;
+        s_since_flip = 0;
+    }
+    if (sg != 0) s_last_sign = sg;
+
+    /* 回中后很快清空反转计数: 否则 S弯/锯齿会拖尾到后面的直道上 */
+    if (a < 10.0f)
+    {
+        if (s_quiet_ms < 60000) s_quiet_ms += 5;
+        if (s_quiet_ms > 200)
+        {
+            s_flip_fast = 0;
+            s_flip_slow = 0;
+        }
+    }
+    else
+    {
+        s_quiet_ms = 0;
+    }
+
+    /* ---- 半圆弧: 同一方向的大误差持续很久 ---- */
+    if ((a > ARC_ERR_MIN) && (sg != 0))
+    {
+        if (s_arc_ms < 65000) s_arc_ms += 5;
+    }
+    else
+    {
+        s_arc_ms = 0;
+    }
+
+    /* ---- 分类 ----
+     * 优先级: 元素 > 方向反转(锯齿/S弯) > 半圆弧 > 直角弯 > 普通弯 > 直道
+     * 反转是"确凿证据", 必须排在圆弧前面:
+     * 锯齿和 S 弯同样会持续大误差, 若让圆弧优先会永远进不了锯齿状态。 */
+    if      (Cross_Stage  != 0)            want = TRK_CROSS;
+    else if (HexDia_Flag  != 0)            want = TRK_HEXDIA;
+    else if (s_flip_fast >= FLIP_FAST_CNT) want = TRK_ZIGZAG;
+    else if (s_flip_slow >= FLIP_SLOW_CNT) want = TRK_S_CURVE;
+    /* 半圆弧与直角弯的区分: 两者误差都大, 但圆弧的误差"稳在中间"
+     * (约 45~80), 直角弯往往直接顶到 90~100。 */
+    else if ((s_arc_ms >= ARC_HOLD_MS) && (a < ARC_MAX_ERR)) want = TRK_ARC;
+    else if (Sharp_State  != 0)            want = TRK_SHARP;
+    else if (a > CURVE_STATE_TH)           want = TRK_CURVE;
+    else                                   want = TRK_STRAIGHT;
+
+    /* ---- 状态切换: 确认计数 + 最小保持时间 ---- */
+    holdable = (Track_State == TRK_S_CURVE) || (Track_State == TRK_ZIGZAG);
+
+    if (want == Track_State)
+    {
+        s_cand_cnt = 0;
+        s_cand = Track_State;
+    }
+    else if (holdable && (Track_State_Ms < STATE_MIN_MS) && (want != TRK_CROSS) &&
+             (want != TRK_HEXDIA) && (want != TRK_SHARP))
+    {
+        /* S弯/锯齿还在最小保持期内, 且新状态不是元素 -> 先不切 */
+        s_cand_cnt = 0;
+    }
+    else if (want == s_cand)
+    {
+        if (++s_cand_cnt >= STATE_CONFIRM)
+        {
+            Track_State = want;
+            Track_State_Ms = 0;
+            s_cand_cnt = 0;
+            /* 注意: 这里【不清】反转计数。
+             * 清掉的话, 刚进 S弯的下一轮判据就找不到证据,
+             * 会被"直角弯"(误差 > 41)抢回去, 状态在 3 和 2 之间来回跳。
+             * 计数只靠"安静 200ms"或"1 秒内没反转"自然衰减。 */
+        }
+    }
+    else
+    {
+        s_cand = want;
+        s_cand_cnt = 0;
+    }
+
+    if (Track_State_Ms < 65000) Track_State_Ms += 5;
+
+    Track_Apply(Track_State);
+}
+
 /* 总判断函数, 在中断中调用 */
 void Track_Judge(void)
 {
@@ -360,6 +547,7 @@ void Track_Judge(void)
     Diamond_Judge();
     HexDia_Judge();
     Lap_Judge();
+    Track_Classify();      /* 赛道状态分类(直道/弯/急弯/S弯/圆弧/锯齿...) */
 
     /* 横置/竖置各自的巡航基线: 只在"没有任何元素状态"时才更新,
      * 这样它反映的是平日巡航时的电平, 而不是元素处的峰值。 */

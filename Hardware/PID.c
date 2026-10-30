@@ -24,6 +24,9 @@ volatile int16_t Speed_Delta = 0;
 /* D 项低通系数 */
 #define D_LPF            0.30f
 
+/* 差速上限("PWM@5000 等价"单位, ≈基准速度的 18%) */
+#define DELTA_MAX        900
+
 /* 弯道降速的两个拐点(误差绝对值, 已按新量纲缩放) */
 #define CURVE_TH1        15.0f
 #define CURVE_TH2        45.0f
@@ -62,13 +65,15 @@ void PID_Calculate(void)
     d_raw = Error - Error_Last;
     D_Filt = D_Filt + (d_raw - D_Filt) * D_LPF;
 
-    /* 速度越高: 比例增益略降(防直线蛇形), 微分增益略升(加阻尼) */
-    speed_ratio = (float)Speed_Basic / 7500.0f;
+    /* 速度越高: 比例增益略降(防直线蛇形), 微分增益略升(加阻尼)
+     * 注意 Speed_Basic 现在是 mm/s, 满档 700, 这里按 700 归一。
+     * 再乘上赛道状态给的 D 倍数(锯齿/S弯时加大阻尼)。 */
+    speed_ratio = (float)Speed_Basic / 700.0f;
     if (speed_ratio > 1.0f) speed_ratio = 1.0f;
     if (speed_ratio < 0.0f) speed_ratio = 0.0f;
 
     kp_eff = kp * (1.0f - 0.15f * speed_ratio);
-    kd_eff = kd * (1.0f + 0.35f * speed_ratio);
+    kd_eff = kd * (1.0f + 0.35f * speed_ratio) * Track_Kd_Gain;
 
     Speed_Delta = (int16_t)(kp_eff * Error + kd_eff * D_Filt);
 }
@@ -168,7 +173,6 @@ void PID_Sharp_Check(void)
 int16_t PID_Apply(int16_t delta)
 {
     int16_t out = delta;
-    int16_t maxd;
 
     if ((HexDia_Flag == 0) && Lost_State)
     {
@@ -189,11 +193,11 @@ int16_t PID_Apply(int16_t delta)
     /* 赛道元素(十字/圆环)附加的转向偏置 */
     out = (int16_t)(out + Track_Steer_Bias);
 
-    /* 限幅: 内轮保留 10% 牵引力, 防止单轮反转打滑 */
-    maxd = (int16_t)((float)Speed_Basic * 0.90f);
-    if (maxd < 100) maxd = 100;
-    if (out > maxd) out = maxd;
-    if (out < -maxd) out = -maxd;
+    /* 限幅: 差速量纲是 "PWM@5000 等价", 上限固定 900(≈基准的 18%)。
+     * 注意这里不能用 Speed_Basic 相乘 —— Speed_Basic 现在是 mm/s,
+     * 单位不同, 乘出来会大 10 倍。真正的 mm/s 换算在 CarMotor_Control() 里做。 */
+    if (out >  DELTA_MAX) out =  DELTA_MAX;
+    if (out < -DELTA_MAX) out = -DELTA_MAX;
 
     return out;
 }

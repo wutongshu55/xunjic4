@@ -1,4 +1,4 @@
-﻿#ifndef __MENU_H
+#ifndef __MENU_H
 #define __MENU_H
 
 #include "stm32f10x.h"
@@ -27,6 +27,7 @@ extern uint8_t Menu_ZigEn;
 extern uint8_t Menu_DistRaw;
 
 extern const int16_t Speed_Level_Table[3];
+extern const int16_t Speed_Level_MMS[3];   /* 三档目标速度 mm/s */
 
 void Menu_KeyHandler(uint8_t key);
 void Menu_Display(void);
