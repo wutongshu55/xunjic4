@@ -1,10 +1,10 @@
-#ifndef __MENU_H
+﻿#ifndef __MENU_H
 #define __MENU_H
 
 #include "stm32f10x.h"
 
 /* 发车页在菜单中的页号(改页数时这里要同步) */
-#define MENU_PAGE_START 2
+#define MENU_PAGE_START 1
 
 /* 目标圈数: 菜单里不再可选, 固定值, 需要改圈数在这里改 */
 #define MENU_TARGET_LAPS 2
