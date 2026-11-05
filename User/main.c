@@ -68,13 +68,8 @@ int main(void)
             Display_Mode = 2;
             Menu_RunInited = 0;
         }
-        /* 完成停车后切回调试 */
-        if (Display_Mode == 2 && Menu_Running == 2)
-        {
-            Display_Mode = 0;
-            Debug_Inited = 0;
-        }
         /* 运行中被 KEY4 停车(中断里置 Running=0) -> 回发车页, 等待重新发车。
+         * 注: 已删除"跑满圈数自动停车", 停车只能靠按键。
          * 停车本身在 Key_Scan_5ms() 里做, 这里只负责把界面切过去。 */
         else if (Display_Mode == 2 && Menu_Running == 0)
         {
@@ -92,7 +87,7 @@ int main(void)
         }
         /* 运行页按键:
          *   KEY4      = 停车, 并回到发车页(显示 IDLE), 再按一次即可重新发车
-         *   KEY1~KEY3 = 应急暂停(保留圈数), 回调试页
+         *   KEY1~KEY3 = 应急暂停, 回调试页
          * 停车统一走发车页的 Menu_KeyHandler, 避免两处对 Running 的判断不一致。 */
         if (Display_Mode == 2 && key != 0)
         {
@@ -172,14 +167,19 @@ void TIM1_UP_IRQHandler(void)
         /* 2. 编码器更新(采样周期5ms=0.005s) */
         Encoder_Update(0.005f);
 
+        /* 2b. 无陀螺仪航向估计: 由左右轮速度差积分出车头转角,
+         *     给直角弯做角度封顶、给十字路口做航向锁定 */
+        PID_Yaw_Update();
+
         /* 3. 蜂鸣器计时 */
         Beep_Tick();
 
         /* 4. 运行控制 */
         if (Menu_Running == 1)
         {
-            /* 基础速度先定下来(单位 mm/s), 后面调度用 */
-            Speed_Basic = Speed_Level_MMS[Menu_SpeedLevel];
+            /* 车速固定 35% PWM: Speed_Basic 只承载"等效速度"(350 = 名义值),
+             * 弯道/丢线/急弯的降速由 PID_Speed_Schedule 在此基础上缩放。 */
+            Speed_Basic = SPEED_NOMINAL_MMS;
 
             /* 4.1 异常检测: 丢线 / 急弯(锯齿线、直角弯) */
             PID_LostLine_Check();
@@ -191,28 +191,25 @@ void TIM1_UP_IRQHandler(void)
             /* 4.3 赛道元素识别(十字路口/圆环), 会给出额外偏置与速度系数 */
             Track_Judge();
 
-            /* 4.4 合成最终差速: 十字路口强制直行, 再叠加元素偏置与限幅 */
-            if (Track_Straight)
-            {
-                Speed_Delta = 0;
-            }
-            Speed_Delta = PID_Apply(Speed_Delta);
+/* 4.4 合成最终差速: 十字路口强制直行, 再叠加元素偏置与限幅。
+         *     十字期间先清 D 项 —— 路口里误差会被交叉导线拉得剧烈跳变,
+         *     不清的话 D 项记着一个尖峰, 出路口瞬间猛甩一下。
+         *     直行本身 + 航向锁定在 PID_Apply() 里完成(那里有航向基准)。 */
+        if (Track_Straight)
+        {
+            PID_D_Reset();
+        }
+        Speed_Delta = PID_Apply(Speed_Delta);
 
             /* 4.5 速度调度: 弯道降速, 元素降速 */
             Speed_Basic = PID_Speed_Schedule(Speed_Basic);
 
             CarMotor_Control();
         }
-        else if (Menu_Running == 2)
-        {
-            /* 完成停车 */
-            Motor_Out(0, 0);
-            Speed_Loop_Reset();
-            Speed_Basic = 0;
-        }
         else
         {
-            /* 待发车, 电机停止(顺带清速度环积分, 避免起步冲一下) */
+            /* 未发车 / 已按 KEY4 停车: 电机停止(顺带清速度环积分, 避免起步冲一下)。
+             * 这是现在【唯一】的停车路径 —— 没有圈数、没有自动停车。 */
             Motor_Out(0, 0);
             Speed_Loop_Reset();
         }

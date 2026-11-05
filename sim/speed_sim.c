@@ -10,7 +10,8 @@
 #define PLANT_KV      0.091f    /* 每单位占空比对应的稳态速度 mm/s (10000档 ≈ 800mm/s) */
 #define PLANT_DEAD    1200.0f   /* 低于此占空比电机不转 */
 #define PLANT_TAU     0.08f     /* 机械时间常数 s */
-#define ENC_RES       8.57f     /* 20ms 测速窗口的量化步长 mm/s */
+#define ENC_RES       17.14f    /* 20ms 测速窗口的量化步长 mm/s
+                                 * = 周长150.8 / 每转440计数 / 0.02s */
 #define ENC_PERIOD_MS 20
 
 static float s_v = 0.0f;            /* 真实轮速 */
@@ -42,6 +43,19 @@ volatile int16_t Speed_Delta = 0;
 volatile int32_t Speed_L_mms = 0;
 volatile int32_t Speed_R_mms = 0;
 volatile int32_t Speed_Avg_mms = 0;
+
+/* 菜单里定义、Motor.c 会用到的量(本仿真不链 Menu.c, 给桩)
+ * 数值必须与 Hardware/Menu.c 保持一致。 */
+uint8_t        Menu_SpdMode    = 0;                  /* 0=CL 闭环 */
+uint8_t        Menu_SpeedLevel = 1;
+/* 直角两段式 / 赛道元素: Motor.c 会读, 本仿真不链 PID.c/Ring_Judge.c, 给桩 */
+uint8_t        Sharp_State     = 0;
+int8_t         Sharp_Dir       = 1;
+uint16_t       Sharp_Lead      = 0;
+uint8_t        HexDia_Flag     = 0;
+uint8_t        Track_Straight  = 0;
+const int16_t  Speed_Level_MMS[3] = {300, 450, 750};
+const int16_t  Speed_Level_PWM[3] = {3000, 4500, 6400};
 
 void PWM_Init(uint32_t freq) { (void)freq; }
 void PWMA_SetDuty(int16_t duty) { s_duty_a = duty; }
@@ -248,6 +262,51 @@ int main(void)
     CHECK(Speed_Fault == 2,            "应识别为编码器反接(F2), 实际 F%u", Speed_Fault);
     CHECK(fabsf(s_v - 300.0f) <= 40.0f, "纠正后应闭环到 300, 实际 %.1f", s_v);
     CHECK(peak <= 300.0f * 1.8f,       "纠正过程不应冲到满速: 峰值 %.1f", peak);
+
+    /* ---- 9. 固定 20% PWM: 纯占空比, 完全不用编码器(现在的唯一车速) ---- */
+    printf("\n[9] 固定 20%% PWM(纯占空比), 编码器仍然断线\n");
+    Reset_Plant();
+    s_enc_mode     = 1;                 /* 编码器继续坏着 */
+    Menu_SpdMode   = 2;
+    Speed_Basic    = SPEED_NOMINAL_MMS; /* 名义值: 直道不降速 -> 20% */
+    Run(1500, &peak);
+    printf("  占空比 %d (应 = %d), 实际 %.1f mm/s\n", s_duty_a, PWM_BASE_DUTY, s_v);
+    CHECK(s_duty_a == PWM_BASE_DUTY, "PWM 固定基准应输出 %d, 实际 %d", PWM_BASE_DUTY, s_duty_a);
+    CHECK(s_v > 60.0f,      "PWM 档应该跑得起来, 实际 %.1f", s_v);
+
+    /* 降速时基准按比例缩: 占空比跟着减半(调度已关闭, 这里只验证数学关系) */
+    Speed_Basic = SPEED_NOMINAL_MMS / 2;
+    Run(300, NULL);
+    printf("  基准减半: 占空比 %d (应 = %d)\n", s_duty_a, PWM_BASE_DUTY / 2);
+    CHECK(s_duty_a == PWM_BASE_DUTY / 2, "基准减半应按比例缩占空比, 实际 %d", s_duty_a);
+    Speed_Basic = SPEED_NOMINAL_MMS;
+
+    /* 差速在 PWM 档也必须能左右分速 */
+    printf("  直道差速 Speed_Delta=400 时左右占空比应分开\n");
+    Speed_Delta = 400;
+    Run(60, NULL);
+    printf("  左 %d / 右 %d\n", s_duty_a, s_duty_b);
+    CHECK(s_duty_a - s_duty_b == 800, "PWM 档差速应为 ±400: 左 %d 右 %d", s_duty_a, s_duty_b);
+    Speed_Delta = 0;
+
+    /* ---- 10. 直角两段式: 前瞻直行 + 内轮接近停转 ---- */
+    printf("\n[10] 直角两段式(20%% 基准)\n");
+    Speed_Basic = SPEED_NOMINAL_MMS;    /* 200 -> 基准 2000 */
+    Sharp_State = 1;
+    Sharp_Dir   = 1;                    /* 左轮走、右轮停 */
+    Sharp_Lead  = 5;                    /* 前瞻段 */
+    Run(20, NULL);
+    printf("  前瞻段: 左 %d / 右 %d (应都 = 2000)\n", s_duty_a, s_duty_b);
+    CHECK(s_duty_a == 2000 && s_duty_b == 2000, "前瞻段应直行: %d/%d", s_duty_a, s_duty_b);
+
+    Sharp_Lead = 0;                     /* 弯心到车轮下 -> 急转 */
+    Run(100, NULL);
+    printf("  急转段: 左 %d / 右 %d (右轮应接近停转)\n", s_duty_a, s_duty_b);
+    CHECK(s_duty_a == 2000, "急转外轮应保持基准, 实际 %d", s_duty_a);
+    CHECK(s_duty_b == 150,  "急转内轮应降到接近停转, 实际 %d", s_duty_b);
+    Sharp_State = 0;
+
+    Menu_SpdMode = 0;
 
     printf("\n=========================================\n");
     printf(" checks=%d  failures=%d  -> %s\n", g_checks, g_fail, g_fail ? "FAIL" : "ALL PASS");

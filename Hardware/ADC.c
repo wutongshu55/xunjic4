@@ -29,6 +29,12 @@ volatile int16_t ADC_L = 0, ADC_ML = 0, ADC_MR = 0, ADC_R = 0;
  * 误差计算必须用浮点, 整数版本只给显示和状态机用 */
 volatile float ADC_Lf = 0.0f, ADC_MLf = 0.0f, ADC_MRf = 0.0f, ADC_Rf = 0.0f;
 volatile float Error = 0.0f, Error_Last = 0.0f, Error_Raw = 0.0f;
+/* 两路【独立】误差(各带低通), 由 PID 层分别算 PD 再融合:
+ *   Error_H: 左右横置(L/R)的差比和 —— 直道主力, 反映"车离线中心偏多少"
+ *   Error_V: 中左/中右竖置(ML/MR)的差比和 —— 弯道信号, 竖置指向性强,
+ *            前方有弯/交叉时才抬头, 邻线从旁边经过时几乎不响应 */
+volatile float Error_H = 0.0f;
+volatile float Error_V = 0.0f;
 
 uint16_t ADC_MAX[4] = {0, 0, 0, 0};
 uint16_t ADC_MIN[4] = {0, 0, 0, 0};
@@ -40,13 +46,15 @@ float B = 1.0f;
 float C = 0.0f;
 
 /* ------------------------------------------------------------
- *  布局权重: 横置 80% / 竖置 20%
- *  W_OUT : W_IN = 4 : 1 -> 4/(4+1) = 80%
- *  这是"横置是循迹主力, 竖置只做弱修正"的直接体现。
- *  想再压一点竖置的权重就把 W_IN 调到 0.5(=> 89%/11%)。
+ *  布局权重: 横置 72.7% / 竖置 27.3%
+ *  W_OUT : W_IN = 4 : 1.5 -> 4/5.5 ≈ 73%
+ *  横置仍是循迹主力, 但竖置比重已从 20% 提到 27%:
+ *  竖置指向性强、不受邻线干扰, 弯道/交叉时给合成误差更大的话语权,
+ *  弯道降速和状态分类都会更早响应。
+ *  注意: 直道上竖置接近 0 且被 V_ACT_MIN 旁路, 这个权重不影响直线。
  * ------------------------------------------------------------ */
 #define W_OUT 4.0f
-#define W_IN  1.0f
+#define W_IN  1.5f
 
 /* 误差一阶低通系数(0~1), 越大越灵敏但越抖 */
 #define ERROR_LPF 0.5f
@@ -299,6 +307,12 @@ void Get_Error(void)
 
     /* 一阶低通: 抑制量化抖动, 同时保留响应速度 */
     Error = Error + (Error_Raw - Error) * ERROR_LPF;
+
+    /* 两路独立误差(各自限幅 + 低通), 给双 PID 用 */
+    if (eh >  1.0f) eh =  1.0f;  else if (eh < -1.0f) eh = -1.0f;
+    if (ev >  1.0f) ev =  1.0f;  else if (ev < -1.0f) ev = -1.0f;
+    Error_H = Error_H + (eh * 100.0f - Error_H) * ERROR_LPF;
+    Error_V = Error_V + (ev * 100.0f - Error_V) * ERROR_LPF;
 }
 
 /* ============================================================

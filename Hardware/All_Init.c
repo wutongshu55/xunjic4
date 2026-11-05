@@ -20,12 +20,18 @@ void All_Init(void)
     /* OLED 必须在 Timer_Init 之前初始化,
        否则 TIM1 中断会打断 I2C 时序导致屏幕不亮 */
     OLED_Init();
-    Beep_Init();
     Key_Init();
     Motor_Init();
     Encoder_Init();
     ADC_MyInit();
+    /* 最后配置 PA8, 确保其他外设初始化不会覆盖蜂鸣器 GPIO。 */
+    Beep_Init();
     Timer_Init();       /* 定时中断最后开启 */
+
+    /* 开机自检: 上电"嘀"一声(300ms, 有源蜂鸣器)。
+     * 听不到 -> 菜单第 6 页 Beep 改 1/2/0 逐个试;
+     * 上电一直长响 -> 极性反了, 改 2(低电平驱动)。 */
+    Beep_On(300);
 
     OLED_Clear();
 }

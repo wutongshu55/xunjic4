@@ -1,74 +1,43 @@
 ﻿#include "Common_headfile.h"
 
 /* ===================== 全局运行参数 ===================== */
-/* 是否进入六角菱形环: 0=不进 1=进 */
-uint8_t  Menu_HexDiaEn    = 0;
-/* 车速档位: 0=慢 1=中 2=快 */
-uint8_t  Menu_SpeedLevel  = 1;
-/* 目标圈数(菜单里不再可调, 固定为下面的常量) */
-uint8_t  Menu_TargetLaps  = MENU_TARGET_LAPS;
-/* 已完成圈数 */
-uint8_t  Menu_DoneLaps    = 0;
-/* 是否已发车(0=待发车 1=运行中 2=完成停车) */
+/* 是否进入六角菱形环: 0=不进 1=进
+ * 本赛道(蓝底黑线场地)右侧有白色标记的菱形环, 默认开启;
+ * 若现场发现普通直角弯被误判成环, 在菜单第 6 页 Mode 关掉。 */
+uint8_t  Menu_HexDiaEn    = 1;
+/* 是否已发车(0=待发车 1=运行中)
+ * 注: 原来还有 2=跑满圈数自动停车, 已删除 —— 现在只能靠按 KEY4 停车。 */
 uint8_t  Menu_Running     = 0;
 /* 十字路口计数 */
 uint8_t  Menu_CrossCount  = 0;
 /* 菜单页索引 */
 uint8_t  Menu_Page        = 0;
 
-/* 新增: 电感标定模式 0=用固定标定值 1=运行中自动标定 */
+/* 电感标定模式 0=用固定标定值 1=运行中自动标定 */
 uint8_t  Menu_CalibMode   = 0;
-/* 新增: 急弯(锯齿线/直角弯)保持模式 0=关 1=开 */
+/* 急弯(锯齿线/直角弯)保持模式 0=关 1=开 */
 uint8_t  Menu_ZigEn       = 1;
-/* 新增: 距离测试页显示原始值还是归一化值 */
+/* 距离测试页显示模式 0=归一化 1=原始 2=峰值 3=编码器 4=编码器引脚 */
 uint8_t  Menu_DistRaw     = 0;
 
-/* 三档车速: 现在给的是【目标速度 mm/s】, 由速度环闭环执行 */
-const int16_t Speed_Level_MMS[3] = {300, 480, 700};
+/* 速度控制方式: 【固定 35% PWM 开环】, 不再可选(车速选择已删除)。
+ * 变量保留是为了让 Motor.c 的执行路径与主机端仿真正常工作。 */
+uint8_t  Menu_SpdMode     = SPD_MODE_PWM;
 
-/* 旧的 PWM 开环表, 仅在需要对照时参考 */
-const int16_t Speed_Level_Table[3] = {3000, 5000, 7500};
-
-/* 菜单页数(精简为 7 页):
- * 0=车速 1=发车 2=标定 3=距离/编码器 4=Kp 5=Kd 6=模式开关(环/急弯/闭环)
- * 原来独立的 HexDia / Sharp / Loop 三页合并成第 7 页"Mode",
- * KEY3 选择条目, KEY4 切换该条目的值。 */
+/* 菜单页数(7 页):
+ * 0=发车 1=标定 2=距离/编码器 3=Kp 4=Kd 5=模式开关(环/急弯/蜂鸣器) 6=滞后
+ * 车速选择页已删除(车速固定 20% PWM), SpdMod 条目一并删除。 */
 #define MENU_PAGES 7
 
-/* 模式页当前选中的条目: 0=六角环 1=急弯 2=开环闭环 */
+/* 模式页当前选中的条目: 0=六角环 1=急弯 2=蜂鸣器模式 */
 uint8_t Menu_Mode_Sel = 0;
 
 /* 菜单是否需要重画标签 */
 uint8_t Menu_Inited = 0;
 
-/* 获取某页参数指针(仅适用于整型参数页) */
-static uint8_t *Menu_GetParam(uint8_t page)
-{
-    switch (page)
-    {
-        case 0: return &Menu_SpeedLevel;
-        case 2: return &Menu_CalibMode;
-        default: return &Menu_Page;
-    }
-}
-
-/* 每页参数上限 */
-static uint8_t Menu_GetMax(uint8_t page)
-{
-    switch (page)
-    {
-        case 0: return 2;   /* 车速: 0慢 1中 2快 */
-        case 2: return 1;   /* 标定: 0固定 1自动 */
-        default: return 0;
-    }
-}
-
 /* 菜单按键处理: KEY1=上一页 KEY2=下一页 KEY3=数值- KEY4=数值+ */
 void Menu_KeyHandler(uint8_t key)
 {
-    uint8_t *p;
-    uint8_t  mx;
-
     if (key == 0) return;
 
     if (key == 1)
@@ -100,25 +69,21 @@ void Menu_KeyHandler(uint8_t key)
                 }
                 else
                 {
-                    /* 上一次已经跑完(圈数达标)则视为新一次比赛, 清零计数,
-                     * 否则重新发车会带着旧的圈数, 跑一圈就直接停车 */
-                    if (Menu_DoneLaps >= Menu_TargetLaps)
-                    {
-                        Menu_DoneLaps   = 0;
-                        Menu_CrossCount = 0;
-                    }
+                    Menu_CrossCount = 0;         /* 路口计数(只显示用) */
 
                     /* 发车前把闭环/状态机的状态清干净 */
                     Speed_Loop_Reset();          /* 速度环积分 */
                     Speed_Fault_Reset();         /* 故障标志重新检测 */
                     Track_StateMachine_Reset();  /* 赛道状态机 */
+                    Cross_Reset();               /* 十字/路口状态机 */
+                    PID_Apply_Reset();           /* 差速斜率/D 项残留清零 */
                     Menu_Running = 1;            /* 发车 */
                     Beep_On(200);
                 }
             }
             break;
 
-        case 2: /* 标定页: KEY3=重新标定  KEY4=固定/自动切换 */
+        case 1: /* 标定页: KEY3=重新标定  KEY4=固定/自动切换 */
             if (key == 3)
             {
                 ADC_Calib_Reset();
@@ -132,13 +97,15 @@ void Menu_KeyHandler(uint8_t key)
             }
             break;
 
-        case 3: /* 距离/编码器页: KEY3=清零  KEY4=切换显示模式 */
+        case 2: /* 距离/编码器页: KEY3=清零  KEY4=切换显示模式 */
             if (key == 3)
             {
-                if (Menu_DistRaw == 3)
+                if (Menu_DistRaw >= 3)
                 {
-                    Encoder_L_Total = 0;    /* 模式4: 清零里程计数 */
+                    Encoder_L_Total = 0;    /* 模式4/5: 清零里程与脉冲计数 */
                     Encoder_R_Total = 0;
+                    Enc_Pulse_L     = 0;
+                    Enc_Pulse_R     = 0;
                 }
                 else
                 {
@@ -149,27 +116,27 @@ void Menu_KeyHandler(uint8_t key)
             else
             {
                 Menu_DistRaw++;
-                if (Menu_DistRaw > 3) Menu_DistRaw = 0;
+                if (Menu_DistRaw > 4) Menu_DistRaw = 0;
                 Menu_Inited = 0;        /* 标签随模式变化, 强制重画 */
             }
             break;
 
-        case 4: /* Kp 在线调参 */
+        case 3: /* Kp 在线调参(横置/直道 PID) */
             if (key == 3) { if (kp > 1.0f)  kp -= 0.5f; }
             else          { if (kp < 60.0f) kp += 0.5f; }
             break;
 
-        case 5: /* Kd 在线调参 */
+        case 4: /* Kd 在线调参(横置/直道 PID) */
             if (key == 3) { if (kd > 0.0f)  kd -= 0.5f; }
             else          { if (kd < 30.0f) kd += 0.5f; }
             break;
 
-        case 6: /* 模式页: KEY3=选择条目  KEY4=切换该条目的值 */
+        case 5: /* 模式页: KEY3=选择条目  KEY4=切换该条目的值 */
             if (key == 3)
             {
                 Menu_Mode_Sel++;
                 if (Menu_Mode_Sel > 2) Menu_Mode_Sel = 0;
-                Beep_On(30);
+                Beep_On(40);
             }
             else
             {
@@ -183,23 +150,27 @@ void Menu_KeyHandler(uint8_t key)
                 }
                 else
                 {
-                    Speed_Loop_En = !Speed_Loop_En;
-                    Speed_Loop_Reset();      /* 切换模式时清积分, 避免冲一下 */
+                    /* 蜂鸣器模式: 0=无源方波 1=有源高电平 2=有源低电平
+                     * 每种切换后立刻试鸣 300ms, 现场听到哪个响就用哪个 */
+                    Beep_Mode++;
+                    if (Beep_Mode > 2) Beep_Mode = 0;
+                    Beep_On(300);
+                    break;
                 }
                 Beep_On(60);
             }
             break;
 
-        default: /* 通用整型参数增减(车速页) */
-            p  = Menu_GetParam(Menu_Page);
-            mx = Menu_GetMax(Menu_Page);
+        case 6: /* 滞后页: 前瞻延迟比例, 每按一次 0.05(5%) */
             if (key == 3)
             {
-                if (*p > 0) (*p)--;
+                Lag_Ratio -= 0.05f;
+                if (Lag_Ratio < 0.0f) Lag_Ratio = 0.0f;
             }
             else
             {
-                if (*p < mx) (*p)++;
+                Lag_Ratio += 0.05f;
+                if (Lag_Ratio > 1.0f) Lag_Ratio = 1.0f;
             }
             break;
     }
@@ -214,24 +185,17 @@ void Menu_Display(void)
         OLED_ShowString(1, 1, "== Menu ===");
         switch (Menu_Page)
         {
-            case 0: /* 车速 */
-                OLED_ShowString(2, 1, "Speed");
-                OLED_ShowString(3, 1, "0:Sl 1:Mi 2:Fa");
-                OLED_ShowString(4, 1, "Gear");
-                OLED_ShowString(4, 8, "|");
-                OLED_ShowString(4, 14, "mms");
-                break;
-            case MENU_PAGE_START: /* 发车 */
+            case MENU_PAGE_START: /* 发车(第 1 页) */
                 OLED_ShowString(2, 1, "Start");
                 OLED_ShowString(3, 1, "K4: GO/STOP ");
                 OLED_ShowString(4, 1, "Run:          ");
                 break;
-            case 2: /* 标定 */
+            case 1: /* 标定 */
                 OLED_ShowString(2, 1, "Calib");
                 OLED_ShowString(3, 1, "0:fix 1:auto");
                 OLED_ShowString(4, 1, "MIN    MAX   ");
                 break;
-            case 3: /* 距离/编码器: 四种模式循环(KEY4 切换, KEY3 清零) */
+            case 2: /* 距离/编码器: 五种模式循环(KEY4 切换, KEY3 清零) */
                 if (Menu_DistRaw == 0)
                 {
                     /* 归一化实时值: 横/竖各自 0~100 */
@@ -260,7 +224,7 @@ void Menu_Display(void)
                     OLED_ShowString(3, 1, "V");
                     OLED_ShowString(4, 1, "SAT     K3:CLR");
                 }
-                else
+                else if (Menu_DistRaw == 3)
                 {
                     /* 编码器自检: 手推车 1 米, 看 L/R 速度和总计数是否在动 */
                     OLED_ShowString(1, 1, "= Enc  K3CLR=");
@@ -269,26 +233,41 @@ void Menu_Display(void)
                     OLED_ShowString(3, 1, "CL");
                     OLED_ShowString(4, 1, "CR");
                 }
+                else
+                {
+                    /* 编码器引脚诊断: 手推车看 4 个脚的电平是否跳变 + 累计脉冲 */
+                    OLED_ShowString(1, 1, "= EncPin K3CLR");
+                    OLED_ShowString(2, 1, "LA B  RA B ");
+                    OLED_ShowString(3, 1, "PL     PR");
+                    OLED_ShowString(4, 1, "CPR    E  M ");
+                }
                 break;
-            case 4: /* Kp: 顺带显示实时 E / D, 一边拧一边看 */
+            case 3: /* Kp: 显示横置误差 / D 项, 一边拧一边看 */
                 OLED_ShowString(2, 1, "Kp x10  K3-/K4+");
                 OLED_ShowString(3, 1, "E");
                 OLED_ShowString(3, 7, "D");
                 OLED_ShowString(4, 1, "Kp:");
                 OLED_ShowString(4, 9, "Dl");
                 break;
-            case 5: /* Kd: 同上 */
+            case 4: /* Kd: 同上 */
                 OLED_ShowString(2, 1, "Kd x10  K3-/K4+");
                 OLED_ShowString(3, 1, "E");
                 OLED_ShowString(3, 7, "D");
                 OLED_ShowString(4, 1, "Kd:");
                 OLED_ShowString(4, 9, "Dl");
                 break;
-            case 6: /* 模式页: 三合一开关 */
+            case 5: /* 模式页: 三个条目 */
                 OLED_ShowString(1, 1, "= Mode 1/3 =");
                 OLED_ShowString(2, 1, " HexDia     ");
                 OLED_ShowString(3, 1, " Sharp      ");
-                OLED_ShowString(4, 1, " Loop       ");
+                OLED_ShowString(4, 1, " Beep       ");
+                break;
+            case 6: /* 滞后页: 比例 + 当前实际延迟周期数 */
+                OLED_ShowString(2, 1, "Lag x100 K3-/K4+");
+                OLED_ShowString(3, 1, "R");
+                OLED_ShowString(3, 6, "K");
+                OLED_ShowString(4, 1, "Lag:");
+                OLED_ShowString(4, 9, "Dl");
                 break;
         }
         Menu_Inited = 1;
@@ -297,20 +276,14 @@ void Menu_Display(void)
     /* 只更新数值 */
     switch (Menu_Page)
     {
-        case 0: /* 车速: 档位 + 目标 mm/s(3 位) */
-            OLED_ShowNum(4, 6, Menu_SpeedLevel, 1);
-            OLED_ShowNum(4, 10, Speed_Level_MMS[Menu_SpeedLevel], 3);
-            break;
         case MENU_PAGE_START: /* 发车 */
-            if (Menu_Running == 0)      OLED_ShowString(4, 6, "IDLE ");
-            else if (Menu_Running == 1) OLED_ShowString(4, 6, "RUN  ");
-            else                        OLED_ShowString(4, 6, "DONE ");
+            OLED_ShowString(4, 6, (Menu_Running == 1) ? "RUN " : "IDLE");
             break;
-        case 2: /* 标定: 显示左电感(通道3)的标定范围 */
+        case 1: /* 标定: 显示左电感(通道3)的标定范围 */
             OLED_ShowNum(4, 5, ADC_MIN[3], 4);
             OLED_ShowNum(4, 12, ADC_MAX[3], 4);
             break;
-        case 3: /* 距离/编码器 */
+        case 2: /* 距离/编码器 */
             if (Menu_DistRaw == 0)
             {
                 OLED_ShowNum(2, 3, ADC_L, 3);      /* 左横置 PA7 */
@@ -328,6 +301,21 @@ void Menu_Display(void)
                 OLED_ShowSignedNum(2, 9, Speed_R_mms, 4);
                 OLED_ShowSignedNum(3, 3, Encoder_L_Total, 6);
                 OLED_ShowSignedNum(4, 3, Encoder_R_Total, 6);
+            }
+            else if (Menu_DistRaw == 4)
+            {
+                /* 引脚诊断: 电平位图 + 上电起的累计脉冲 + 每转计数/边沿/方式 */
+                uint8_t lv = Encoder_ReadLevel();
+
+                OLED_ShowNum(2, 3,  (uint32_t)((lv >> 0) & 0x01), 1);   /* PA0 左A */
+                OLED_ShowNum(2, 5,  (uint32_t)((lv >> 1) & 0x01), 1);   /* PA1 左B */
+                OLED_ShowNum(2, 9,  (uint32_t)((lv >> 2) & 0x01), 1);   /* PB6 右A */
+                OLED_ShowNum(2, 11, (uint32_t)((lv >> 3) & 0x01), 1);   /* PB7 右B */
+                OLED_ShowSignedNum(3, 3,  Enc_Pulse_L, 5);
+                OLED_ShowSignedNum(3, 10, Enc_Pulse_R, 5);
+                OLED_ShowNum(4, 4,  (uint32_t)Encoder_CPR, 3);
+                OLED_ShowNum(4, 9,  (uint32_t)Encoder_Edge, 1);
+                OLED_ShowNum(4, 12, (uint32_t)Encoder_Method, 1);
             }
             else
             {
@@ -351,39 +339,79 @@ void Menu_Display(void)
                 OLED_ShowNum(4, 5, ADC_SatFlag, 2);      /* 饱和通道位图 */
             }
             break;
-        case 4: /* Kp: 误差 / 微分项 / 参数 / 输出差速 */
-            OLED_ShowSignedNum(3, 2, (int32_t)Error, 4);
+        case 3: /* Kp: 横置误差 / D 项 / 航向角 / 参数 / 输出差速 */
+            OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
             OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
+            OLED_ShowString(3, 11, "Y");
+            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
             OLED_ShowNum(4, 5, (uint32_t)(kp * 10.0f + 0.5f), 3);
             OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
             break;
-        case 5: /* Kd: 同上 */
-            OLED_ShowSignedNum(3, 2, (int32_t)Error, 4);
+        case 4: /* Kd: 同上 */
+            OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
             OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
+            OLED_ShowString(3, 11, "Y");
+            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
             OLED_ShowNum(4, 5, (uint32_t)(kd * 10.0f + 0.5f), 3);
             OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
             break;
-        case 6: /* 模式页: 选中标记 + 三个开关值 */
+        case 5: /* 模式页: 选中标记 + 三个条目的值 */
             OLED_ShowNum(1, 8, (uint32_t)(Menu_Mode_Sel + 1), 1);
             OLED_ShowString(2, 1, (Menu_Mode_Sel == 0) ? ">" : " ");
             OLED_ShowString(3, 1, (Menu_Mode_Sel == 1) ? ">" : " ");
             OLED_ShowString(4, 1, (Menu_Mode_Sel == 2) ? ">" : " ");
             OLED_ShowNum(2, 12, Menu_HexDiaEn, 1);
             OLED_ShowNum(3, 12, Menu_ZigEn, 1);
-            OLED_ShowNum(4, 12, Speed_Loop_En, 1);
+            OLED_ShowNum(4, 12, Beep_Mode, 1);
+            break;
+        case 6: /* 滞后页: R=比例(x100)  K=实际延迟周期数  Dl=输出差速 */
+            OLED_ShowNum(3, 2, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
+            OLED_ShowNum(3, 7, Lag_Cycles, 3);
+            OLED_ShowNum(4, 5, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
+            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
             break;
     }
 }
 /* 运行显示页是否需要重画标签 */
 uint8_t Menu_RunInited = 0;
 
+static char *Menu_RunStateCode(void)
+{
+    if (Cross_Stage != 0 || Track_Straight) return "X";
+    if (HexDia_Flag != 0) return "H";
+    if (Sharp_State) return "R";
+    if (Lost_State) return "L";
+
+    switch (Track_State)
+    {
+        case TRK_STRAIGHT: return "S";
+        case TRK_CURVE:    return "C";
+        case TRK_SHARP:    return "R";
+        case TRK_S_CURVE:  return "B";
+        case TRK_CROSS:    return "X";
+        case TRK_HEXDIA:   return "H";
+        case TRK_ARC:      return "A";
+        case TRK_ZIGZAG:   return "Z";
+        default:           return "?";
+    }
+}
+
+static char *Menu_RunTurnCode(void)
+{
+    if (Track_Straight || Cross_Stage != 0) return "F";
+    if (Sharp_State) return (Sharp_Dir > 0) ? "R" : "L";
+    if (Speed_Delta > 40) return "R";
+    if (Speed_Delta < -40) return "L";
+    return "F";
+}
+
 /* 运行时显示页(发车后) - 不清屏, 只更新数据位置
  *
  * 布局(16 列 x 4 行):
  *   L 55 ML 02 MR 02     四路电感归一化值(横置 L/R, 竖置 ML/MR)
  *   R 55 E+0012 S45      右横置 / 循迹误差 / 综合场强
- *   T300 A296 L1/2       左轮目标速度 / 平均实际速度 / 已完成圈数
- *   S2 X03 D4800         赛道状态 / 十字计数 / 左轮占空比
+ *   T300 A296 d+400      左轮目标速度 / 平均实际速度 / 循迹差速
+ *   MRTFX03D4800F0       模式 / 转向 / 十字计数 / 左轮占空比 / 故障码
  */
 void Menu_RunDisplay(void)
 {
@@ -398,11 +426,12 @@ void Menu_RunDisplay(void)
         OLED_ShowString(2, 11, "S");
         OLED_ShowString(3, 1,  "T");
         OLED_ShowString(3, 6,  "A");
-        OLED_ShowString(3, 11, "L");
-        OLED_ShowString(3, 13, "/");
-        OLED_ShowString(4, 1,  "S");
-        OLED_ShowString(4, 4,  "X");
+        OLED_ShowString(3, 11, "d");
+        OLED_ShowString(4, 1,  "M");
+        OLED_ShowString(4, 3,  "T");
+        OLED_ShowString(4, 5,  "X");
         OLED_ShowString(4, 8,  "D");
+        OLED_ShowString(4, 13, "F");
         Menu_RunInited = 1;
     }
 
@@ -414,19 +443,14 @@ void Menu_RunDisplay(void)
     OLED_ShowNum(2, 2,  ADC_R, 3);
     OLED_ShowSignedNum(2, 6, (int32_t)Error, 4);
     OLED_ShowNum(2, 12, ADC_Strength, 2);
-    /* 第3行: 左轮目标速度 / 平均实际速度 / 圈数进度 */
+    /* 第3行: 左轮目标速度 / 平均实际速度 / 循迹差速(圈数已删除) */
     OLED_ShowNum(3, 2,  Speed_Target_L, 3);
     OLED_ShowNum(3, 7,  Speed_Avg_mms, 3);
-    OLED_ShowNum(3, 12, Menu_DoneLaps, 1);
-    OLED_ShowNum(3, 14, Menu_TargetLaps, 1);
-    /* 第4行: 赛道状态 / 十字计数 / 左轮占空比 / 速度环故障标志 */
-    OLED_ShowNum(4, 2,  Track_State, 1);
-    OLED_ShowNum(4, 5,  Menu_CrossCount, 2);
-    OLED_ShowNum(4, 9,  Duty_L, 4);
-
-    /* F1 = 测不到速度(已自动降级开环)  F2 = 编码器反接(已自动纠正)
-     * 两个都是"车还能跑但配置有问题"的提示, 看到就停车检查编码器。 */
-    if (Speed_Fault == 0)      OLED_ShowString(4, 14, "  ");
-    else if (Speed_Fault == 1) OLED_ShowString(4, 14, "F1");
-    else                       OLED_ShowString(4, 14, "F2");
+    OLED_ShowSignedNum(3, 11, (int32_t)Speed_Delta, 3);
+    /* 第4行: 状态码 / 当前转向 / 十字计数 / 左轮占空比 / 速度故障码 */
+    OLED_ShowString(4, 2, Menu_RunStateCode());
+    OLED_ShowString(4, 4, Menu_RunTurnCode());
+    OLED_ShowNum(4, 6, Menu_CrossCount, 2);
+    OLED_ShowNum(4, 9, Duty_L, 4);
+    OLED_ShowNum(4, 14, Speed_Fault, 1);
 }

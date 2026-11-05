@@ -45,20 +45,36 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 #define CROSS_CONFIRM    4     /* 至少连续 4 周期(20ms)才算特征成立 */
 #define CROSS_GAP_MAX    5     /* 特征允许间断 5 周期, 防止中途断开重新计时 */
 #define CROSS_HOLD       24    /* 保持直行至少 24 周期(120ms) */
-#define LAP_MIN_TICKS    45    /* "特征"持续超过 45 周期(225ms)判为起点线 */
+#define CROSS_HOLD_MAX   240   /* 直行最长 240 周期(1.2s)。
+                                * 若竖置电感误判(阈值太低/装太近/标定坏),
+                                * 特征会"一直成立", 没有上限车就永远直行不拐弯。
+                                * 300mm/s 下 1.2s 走 36cm, 任何起点线都够通过。 */
+
+/* 说明: 早期版本在这里按"特征持续多久"区分普通十字与起点线, 并计圈,
+ * 跑满目标圈数就自动停车。现已按需求【全部删除】:
+ *   · 十字路口、起点线、折返线 —— 一律只"保持直行通过";
+ *   · 不再计圈, 不存在"到圈数自动停车";
+ *   · 唯一能让车停下来的只有按 KEY4。
+ * 运行页第 4 行的 X 只是路口计数(看识别有没有工作), 不参与任何控制。 */
 
 /* 六角菱形环(赛道右侧进入) */
-#define HEX_R_DOMINANT   45    /* 横置右偏程度 >= 45% 才可能是右弯类元素 */
+#define HEX_DIR          (+1)   /* 入环方向: +1 = 右转入环(环在赛道右侧, 默认)
+                                 *          -1 = 左转入环(整台状态机镜像)。
+                                 * 现场看车行进方向: 环在右手边就 +1, 左手边就 -1 */
+#define HEX_R_DOMINANT   45    /* 靠环侧横置优势 >= 45% 才可能是环入口 */
 #define HEX_V_MIN        20    /* 竖置抬头下限(环内回线让竖置也起来) */
 #define HEX_CONFIRM      10    /* 入口确认周期(太短会在普通右弯误触发) */
 #define HEX_TURN_MAX     40    /* 进环最长 40 周期(200ms) */
 #define HEX_IN_MAX       220   /* 环内最长 220 周期(1.1s) */
 #define HEX_EXIT_MAX     60    /* 出环最长 60 周期(300ms) */
-#define HEX_BACK_DIFF    35    /* 出环: 导线从左侧重新出现的落差阈值(%) */
-#define HEX_BIAS_IN      (-900)  /* 进环转向偏置(负=右转) */
+#define HEX_BACK_DIFF    35    /* 出环: 导线从对侧重新出现的落差阈值(%) */
+#define HEX_BIAS_IN      (-900)  /* 进环转向偏置(负=右转, 乘 HEX_DIR 镜像) */
 #define HEX_BIAS_KEEP    (-300)  /* 环内保持偏置 */
 #define HEX_BIAS_SEARCH  (-700)  /* 环内丢线时的找线偏置(转更多) */
 #define HEX_BIAS_OUT     (-500)  /* 出环偏置 */
+/* 靠环侧 / 对侧的横置电感(随 HEX_DIR 自动镜像) */
+#define HEX_NEAR(ad_l, ad_r)  ((HEX_DIR) > 0 ? (ad_r) : (ad_l))
+#define HEX_FAR(ad_l, ad_r)   ((HEX_DIR) > 0 ? (ad_l) : (ad_r))
 #define HEX_SPD_IN       0.60f
 #define HEX_SPD_KEEP     0.72f
 #define HEX_SPD_SEARCH   0.58f
@@ -104,6 +120,13 @@ static uint8_t Cross_Pattern(void)
 /* ------------------------------------------------------------
  *  十字路口状态机
  * ------------------------------------------------------------ */
+/* 发车时调用: 复位路口状态机(不再涉及圈数) */
+void Cross_Reset(void)
+{
+    Cross_Stage = 0;
+    Cross_Timer = 0;
+}
+
 void Cross_Judge(void)
 {
     static uint16_t hold = 0;
@@ -111,6 +134,19 @@ void Cross_Judge(void)
     static uint16_t pat = 0;    /* 特征真正成立的周期数(不含间断容忍) */
 
     Track_Straight = 0;
+
+    /* 环内【绝不允许】十字抢控制:
+     * 环内回线让竖置抬头、横置又可能接近对称, 正好满足十字特征。
+     * 一旦 Track_Straight=1, PID_Apply 的十字分支会提前 return,
+     * 把环状态机的转向偏置整个吞掉 -> 车在环里一直直行, 永远绕不出去。
+     * 环外的十字仍照常强制直行, 不受影响。 */
+    if (HexDia_Flag != 0)
+    {
+        Cross_Stage = 0;
+        Cross_Timer = 0;
+        hold = 0; gap = 0; pat = 0;
+        return;
+    }
 
     switch (Cross_Stage)
     {
@@ -126,19 +162,21 @@ void Cross_Judge(void)
 
         case 1:
             Cross_Timer++;
+
+            /* 特征一出现就先"软直行": 确认要 4 个周期(20ms), 这 20ms 里
+             * PD 已经可能被交叉导线打出一个大方向, 等确认完再关门就晚了,
+             * 车会斜着穿出路口。先直行, 误检最多损失 20ms。 */
+            Track_Straight = 1;
+
             if (Cross_Pattern())
             {
                 gap = 0;
                 pat++;
-                /* 特征持续够久 -> 宽的起点线, 直接计圈(不必等驶出) */
-                if (pat >= LAP_MIN_TICKS)
+                /* 特征确认 -> 就是路口(宽的起点线也一样), 保持直行通过 */
+                if (pat >= CROSS_CONFIRM)
                 {
-                    Menu_DoneLaps++;
-                    Beep_On(100);
-                    if (Menu_DoneLaps >= Menu_TargetLaps)
-                    {
-                        Menu_Running = 2;
-                    }
+                    Menu_CrossCount++;      /* 只是计数显示, 不参与控制 */
+                    Beep_On(70);
                     hold = CROSS_HOLD;
                     Cross_Stage = 2;
                     Cross_Timer = 0;
@@ -150,23 +188,18 @@ void Cross_Judge(void)
                 gap++;
                 if (gap > CROSS_GAP_MAX)
                 {
-                    /* 特征结束: 按"真正成立"的持续时间判定路口还是起点 */
-                    if (pat >= LAP_MIN_TICKS)
-                    {
-                        Menu_DoneLaps++;
-                        Beep_On(100);
-                        if (Menu_DoneLaps >= Menu_TargetLaps)
-                        {
-                            Menu_Running = 2;
-                        }
-                    }
-                    else if (pat >= CROSS_CONFIRM)
+                    /* 特征结束: 成立过就是路口, 没成立过当噪声丢掉 */
+                    if (pat >= CROSS_CONFIRM)
                     {
                         Menu_CrossCount++;
-                        Beep_On(30);
+                        Beep_On(70);
+                        hold = CROSS_HOLD;
+                        Cross_Stage = 2;
                     }
-                    hold = CROSS_HOLD;
-                    Cross_Stage = 2;
+                    else
+                    {
+                        Cross_Stage = 0;
+                    }
                     Cross_Timer = 0;
                     gap = 0;
                 }
@@ -174,9 +207,11 @@ void Cross_Judge(void)
             break;
 
         case 2:
-            /* 路口保持直行: 不许 PD 乱打方向, 直到驶出路口特征 */
+            /* 路口保持直行: 不许 PD 乱打方向, 直到驶出路口特征。
+             * 但无论如何不能超过 CROSS_HOLD_MAX —— 误判时保证车还能拐弯。 */
             if (hold > 0) hold--;
-            if (hold > 0 || Cross_Pattern())
+            Cross_Timer++;                        /* 本次直行总时长(含续期) */
+            if ((hold > 0 || Cross_Pattern()) && (Cross_Timer < CROSS_HOLD_MAX))
             {
                 Track_Straight = 1;
                 if (hold == 0) hold = CROSS_HOLD;   /* 还在路口, 续期 */
@@ -224,8 +259,8 @@ static uint8_t HexDia_Entry_Pattern(void)
     float v = ADC_V_StrengthF;
 
     if (hsum < 2.0f) return 0;                       /* 横置没信息 */
-    if (ADC_Rf < ADC_Lf) return 0;                   /* 右横置必须是较强侧 */
-    rdom = (ADC_Rf - ADC_Lf) / hsum * 100.0f;        /* 横置自身归一化右偏度 */
+    if (HEX_NEAR(ADC_Lf, ADC_Rf) < HEX_FAR(ADC_Lf, ADC_Rf)) return 0;
+    rdom = (HEX_NEAR(ADC_Lf, ADC_Rf) - HEX_FAR(ADC_Lf, ADC_Rf)) / hsum * 100.0f;
     if (rdom < (float)HEX_R_DOMINANT) return 0;
     if (v < (float)HEX_V_MIN) return 0;              /* 竖置没抬头 -> 普通右弯 */
     return 1;
@@ -238,10 +273,22 @@ static uint8_t HexDia_Back_Pattern(void)
     float ldom;
 
     if (hsum < 2.0f) return 0;
-    if (ADC_Lf < ADC_Rf) return 0;
-    ldom = (ADC_Lf - ADC_Rf) / hsum * 100.0f;
+    if (HEX_FAR(ADC_Lf, ADC_Rf) < HEX_NEAR(ADC_Lf, ADC_Rf)) return 0;
+    ldom = (HEX_FAR(ADC_Lf, ADC_Rf) - HEX_NEAR(ADC_Lf, ADC_Rf)) / hsum * 100.0f;
     if (ldom < (float)HEX_BACK_DIFF) return 0;
     return 1;
+}
+
+/* 出环判据: 导线重新被两路横置电感稳定压住(左右接近对称)。
+ * 旧判据用 fabsf(Error)<14 —— Error 是低通后的差比和, 环出口偏差本来就大,
+ * 加上低通滞后, 车已经回到主线了 Error 还很大 -> 一直卡在出环状态出不去。
+ * 直接看横置两路是否都有信号且基本对称, 不受滤波滞后影响。 */
+static uint8_t HexDia_Recovered(void)
+{
+    float hsum = ADC_Lf + ADC_Rf;
+
+    if (hsum < 2.0f) return 0;
+    return (fabsf(ADC_Lf - ADC_Rf) / hsum * 100.0f < 25.0f) ? 1 : 0;
 }
 
 /* 环内完全压不到导线 */
@@ -259,8 +306,8 @@ void HexDia_Judge(void)
         return;
     }
 
-    /* 十字路口优先: 路口期间不认环 */
-    if (Cross_Stage != 0)
+    /* 十字路口不触发新环; 已进入的环状态仍必须继续计时并走完出环流程。 */
+    if ((Cross_Stage != 0) && (HexDia_Flag == 0))
     {
         return;
     }
@@ -274,7 +321,7 @@ void HexDia_Judge(void)
                 {
                     HexDia_Flag = 1;
                     HexDia_Timer = 0;
-                    Beep_On(40);
+                    Beep_On(110);
                 }
             }
             else
@@ -284,9 +331,9 @@ void HexDia_Judge(void)
             break;
 
         case 1:
-            /* 进环: 强制右转 */
+            /* 进环: 强制向环侧转 */
             HexDia_Timer++;
-            Track_Steer_Bias = HEX_BIAS_IN;
+            Track_Steer_Bias = HEX_BIAS_IN * HEX_DIR;
             Track_Speed_Ratio = HEX_SPD_IN;
             if (HexDia_Timer >= HEX_TURN_MAX)
             {
@@ -300,12 +347,12 @@ void HexDia_Judge(void)
             HexDia_Timer++;
             if (HexDia_Lost())
             {
-                Track_Steer_Bias = HEX_BIAS_SEARCH;
+                Track_Steer_Bias = HEX_BIAS_SEARCH * HEX_DIR;
                 Track_Speed_Ratio = HEX_SPD_SEARCH;
             }
             else
             {
-                Track_Steer_Bias = HEX_BIAS_KEEP;
+                Track_Steer_Bias = HEX_BIAS_KEEP * HEX_DIR;
                 Track_Speed_Ratio = HEX_SPD_KEEP;
             }
             if (HexDia_Back_Pattern())
@@ -323,16 +370,16 @@ void HexDia_Judge(void)
         case 3:
             /* 出环: 减小转向, 等误差回中 */
             HexDia_Timer++;
-            Track_Steer_Bias = HEX_BIAS_OUT;
+            Track_Steer_Bias = HEX_BIAS_OUT * HEX_DIR;
             Track_Speed_Ratio = HEX_SPD_OUT;
             if ((HexDia_Timer >= HEX_EXIT_MAX) ||
-                (fabsf(Error) < 14.0f && HexDia_Timer > 10))
+                (HexDia_Timer > 10 && HexDia_Recovered()))
             {
                 HexDia_Flag = 0;
                 HexDia_Timer = 0;
                 Track_Steer_Bias = 0;
                 Track_Speed_Ratio = 1.0f;
-                Beep_On(50);
+                Beep_On(130);
             }
             break;
 
@@ -344,7 +391,8 @@ void HexDia_Judge(void)
 }
 
 /* ------------------------------------------------------------
- *  圈数判断已并入 Cross_Judge (靠"特征持续时间"区分起点线与普通路口)
+ *  圈数判断已【删除】: 不再计圈, 也不存在"跑满圈数自动停车"。
+ *  保留空函数只是为了不用改调用处。
  * ------------------------------------------------------------ */
 void Lap_Judge(void)
 {

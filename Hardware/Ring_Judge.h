@@ -41,4 +41,7 @@ void HexDia_Judge(void);
 void Lap_Judge(void);
 void Track_Judge(void);
 
+/* 发车时调用: 复位路口状态机(已无圈数逻辑) */
+void Cross_Reset(void);
+
 #endif

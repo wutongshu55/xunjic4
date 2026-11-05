@@ -16,6 +16,8 @@ extern volatile int16_t ADC_L, ADC_ML, ADC_MR, ADC_R;
 /* 浮点归一化值: 误差计算与状态机判据用这个, 避免 8 位量化误差 */
 extern volatile float ADC_Lf, ADC_MLf, ADC_MRf, ADC_Rf;
 extern volatile float Error, Error_Last, Error_Raw;
+extern volatile float Error_H;   /* 横置(L/R)独立误差: 直道 PID 输入 */
+extern volatile float Error_V;   /* 竖置(ML/MR)独立误差: 弯道 PID 输入 */
 extern uint16_t ADC_MAX[4], ADC_MIN[4];
 extern float A, B, C;
 

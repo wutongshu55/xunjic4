@@ -1,4 +1,4 @@
-﻿#include "Common_headfile.h"
+#include "Common_headfile.h"
 
 /* ------------------------------------------------------------
  *  电机输出 + 双轮速度闭环
@@ -28,7 +28,17 @@
 #define SPEED_DUTY_DEAD   1200     /* 电机启动死区(占空比), 低于此值电机不转 */
 #define SPEED_I_LIMIT     3500.0f  /* 积分限幅(占空比) */
 
-volatile int16_t Speed_Basic = 300;      /* mm/s */
+/* 差速随降速收缩的比例(0~1)。0 = 差速不随降速变化(旧行为, 弯道会原地急转),
+ * 1 = 完全等比缩放(转向半径恒定, 但内侧轮几乎不转)。
+ * 0.45 = 折中: 弯道降到 45% 时, 差速收成原来的 0.75。 */
+#define DELTA_SPEED_KEEP  0.45f
+
+/* 直角弯单轮急转: 内轮降到这个占空比(接近停转), 外轮保持基准,
+ * 车几乎绕内轮转 -> 最小转弯半径。斜坡每 5ms 下降一档, 避免瞬间堵转。 */
+#define SHARP_INNER_DUTY  150
+#define SHARP_INNER_STEP  250.0f
+
+volatile int16_t Speed_Basic = 350;      /* mm/s */
 volatile int16_t Speed_Target_L = 0;     /* mm/s */
 volatile int16_t Speed_Target_R = 0;     /* mm/s */
 volatile int16_t Duty_L = 0;             /* 实际输出占空比 */
@@ -68,35 +78,53 @@ void Motor_Init(void)
     GPIO_ResetBits(GPIOB, GPIO_Pin_15);
 }
 
+/* 左右两个轮子的方向极性整体取反:
+ * 1 = 反转(当前: 电感改低/车头方向调整后的接线)
+ * 0 = 恢复原来的方向
+ * 只改这一个宏就能来回切换, 不用动下面的 GPIO 代码。 */
+#define MOTOR_DIR_INVERT 1
+
+#if MOTOR_DIR_INVERT
+#define DIR_POS_1  Bit_SET      /* 正转: IN1 */
+#define DIR_POS_2  Bit_RESET    /* 正转: IN2 */
+#define DIR_NEG_1  Bit_RESET    /* 反转: IN1 */
+#define DIR_NEG_2  Bit_SET      /* 反转: IN2 */
+#else
+#define DIR_POS_1  Bit_RESET
+#define DIR_POS_2  Bit_SET
+#define DIR_NEG_1  Bit_SET
+#define DIR_NEG_2  Bit_RESET
+#endif
+
 void Motor_Out(int16_t L_Speed, int16_t R_Speed)
 {
     if (L_Speed > 0)
     {
         if (L_Speed > PWM_DUTY_MAX) L_Speed = PWM_DUTY_MAX;
-        GPIO_WriteBit(GPIOB, GPIO_Pin_12, Bit_RESET);
-        GPIO_WriteBit(GPIOB, GPIO_Pin_13, Bit_SET);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_12, DIR_POS_1);   /* 左轮 PB12/PB13 */
+        GPIO_WriteBit(GPIOB, GPIO_Pin_13, DIR_POS_2);
         PWMA_SetDuty(L_Speed);
     }
     else
     {
         if (L_Speed < -PWM_DUTY_MAX) L_Speed = -PWM_DUTY_MAX;
-        GPIO_WriteBit(GPIOB, GPIO_Pin_12, Bit_SET);
-        GPIO_WriteBit(GPIOB, GPIO_Pin_13, Bit_RESET);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_12, DIR_NEG_1);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_13, DIR_NEG_2);
         PWMA_SetDuty(-L_Speed);
     }
 
     if (R_Speed > 0)
     {
         if (R_Speed > PWM_DUTY_MAX) R_Speed = PWM_DUTY_MAX;
-        GPIO_WriteBit(GPIOB, GPIO_Pin_14, Bit_RESET);
-        GPIO_WriteBit(GPIOB, GPIO_Pin_15, Bit_SET);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_14, DIR_POS_1);   /* 右轮 PB14/PB15 */
+        GPIO_WriteBit(GPIOB, GPIO_Pin_15, DIR_POS_2);
         PWMB_SetDuty(R_Speed);
     }
     else
     {
         if (R_Speed < -PWM_DUTY_MAX) R_Speed = -PWM_DUTY_MAX;
-        GPIO_WriteBit(GPIOB, GPIO_Pin_14, Bit_SET);
-        GPIO_WriteBit(GPIOB, GPIO_Pin_15, Bit_RESET);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_14, DIR_NEG_1);
+        GPIO_WriteBit(GPIOB, GPIO_Pin_15, DIR_NEG_2);
         PWMB_SetDuty(-R_Speed);
     }
 }
@@ -182,13 +210,84 @@ static float Speed_PI(float target, float actual, float *integ)
  */
 void CarMotor_Control(void)
 {
-    float k     = (float)Speed_Basic / 5000.0f;   /* 差速量纲换算 */
-    float delta = (float)Speed_Delta * k;
-    float tl    = (float)Speed_Basic + delta;
-    float tr    = (float)Speed_Basic - delta;
     float dl, dr;
-    float al, ar;
-    float cap_l, cap_r;
+    float k, delta, tl, tr, al, ar, cap_l, cap_r;
+
+    /* ---- 方式二: 纯 PWM 开环(车速固定 20%, 现在是唯一入口) ----
+     * 基准占空比固定 PWM_BASE_DUTY(20%), 循迹差速按原量纲直接叠加,
+     * 完全不进速度环。弯道降速仍然生效: 按调度后的比例缩放基准占空比
+     * (Speed_Basic 已被 PID_Speed_Schedule 按 0.20~1.0 缩放过)。 */
+    if (Menu_SpdMode == SPD_MODE_PWM)
+    {
+        float base  = (float)PWM_BASE_DUTY;
+        float ratio = 1.0f;
+        float d;
+
+        if (SPEED_NOMINAL_MMS > 0)
+        {
+            ratio = (float)Speed_Basic / (float)SPEED_NOMINAL_MMS;
+            if (ratio > 1.0f) ratio = 1.0f;
+            if (ratio < 0.2f) ratio = 0.2f;
+            base *= ratio;
+        }
+
+        /* 差速跟着基准一起收(见 DELTA_SPEED_KEEP 说明):
+         * 旧代码这里是 d = Speed_Delta 不缩放。弯道降速到 45% 时,
+         * 基准 1575 配上 900 的差速 -> 内轮 675、外轮 2475,
+         * 轮速比接近 4:1, 车在小半径里"原地急转"再甩出去。
+         * 这就是现场"转弯角度太大 / 十字出口甩尾"的主因。 */
+        d = (float)Speed_Delta * (1.0f - DELTA_SPEED_KEEP * (1.0f - ratio));
+
+        dl = base + d;
+        dr = base - d;
+
+        /* ---- 直角弯两段式: 覆盖上面的对称差速, 换最小转弯半径 ----
+         * 电感提前看到直角, 立刻打角会提前转弯、半径大。
+         * 前瞻段(Sharp_Lead>0)保持直行, 弯心到车轮下之后,
+         * 内轮斜坡降到接近停转、外轮保持基准 -> 几乎绕内轮原地转。 */
+        if (Sharp_State && (HexDia_Flag == 0) && !Track_Straight)
+        {
+            static float s_inner = 0.0f;
+
+            if (Sharp_Lead > 0)
+            {
+                s_inner = base;            /* 前瞻段直行, 并预置斜坡起点 */
+                dl = base;
+                dr = base;
+            }
+            else
+            {
+                s_inner -= SHARP_INNER_STEP;
+                if (s_inner < (float)SHARP_INNER_DUTY) s_inner = (float)SHARP_INNER_DUTY;
+                if (Sharp_Dir > 0) { dl = base; dr = s_inner; }  /* 左轮走、右轮停 */
+                else               { dl = s_inner; dr = base; }  /* 右轮走、左轮停 */
+            }
+        }
+
+        if (dl > (float)PWM_DUTY_MAX) dl = (float)PWM_DUTY_MAX;
+        if (dr > (float)PWM_DUTY_MAX) dr = (float)PWM_DUTY_MAX;
+        if (dl < 0.0f) dl = 0.0f;                 /* 循迹阶段不倒车 */
+        if (dr < 0.0f) dr = 0.0f;
+
+        Duty_L = (int16_t)dl;
+        Duty_R = (int16_t)dr;
+        /* 运行页 T 仍显示"等效 mm/s", 方便和实测 A 对照 */
+        Speed_Target_L = (int16_t)(dl / SPEED_FF_GAIN);
+        Speed_Target_R = (int16_t)(dr / SPEED_FF_GAIN);
+
+        s_int_l = 0.0f;
+        s_int_r = 0.0f;
+        Motor_Out(Duty_L, Duty_R);
+        return;
+    }
+
+    /* ---- 方式一: 编码器闭环 / 前馈开环(目标 mm/s) ---- */
+    k     = (float)Speed_Basic / 5000.0f;   /* 差速量纲换算 */
+    delta = (float)Speed_Delta * k;
+    tl    = (float)Speed_Basic + delta;
+    tr    = (float)Speed_Basic - delta;
+    al    = 0.0f;
+    ar    = 0.0f;
 
     if (tl < 0.0f) tl = 0.0f;                     /* 循迹阶段不倒车 */
     if (tr < 0.0f) tr = 0.0f;
