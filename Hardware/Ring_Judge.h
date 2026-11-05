@@ -7,8 +7,6 @@ extern uint8_t  HexDia_Flag;     /* 六角菱形环状态机 */
 extern uint16_t HexDia_Timer;    /* 六角菱形环计时 */
 extern uint8_t  Cross_Stage;
 extern uint16_t Cross_Timer;
-extern uint8_t  Diamond_Stage;
-extern uint16_t Diamond_Timer;
 
 /* 元素对控制的输出 */
 extern uint8_t  Track_Straight;    /* 1 = 强制直行 */
@@ -36,9 +34,7 @@ extern float H_Base;
 extern float V_Base;
 
 void Cross_Judge(void);
-void Diamond_Judge(void);
 void HexDia_Judge(void);
-void Lap_Judge(void);
 void Track_Judge(void);
 
 /* 发车时调用: 复位路口状态机(已无圈数逻辑) */

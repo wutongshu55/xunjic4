@@ -217,18 +217,6 @@ static float ADC_NormF(int16_t index)
     return val;
 }
 
-/* 单路归一化(整数): 只给显示和状态机用 */
-static int16_t ADC_Norm(int16_t index)
-{
-    return (int16_t)ADC_NormF(index);
-}
-
-/* 保留给外部按整数取值的场合 */
-int16_t ADC_GetNorm(int16_t index)
-{
-    return ADC_Norm(index);
-}
-
 void Get_Error(void)
 {
     float eh, ev, num, den, hsum, vsum;

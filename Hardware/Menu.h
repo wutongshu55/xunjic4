@@ -31,10 +31,8 @@ extern uint8_t Menu_ZigEn;
 /* 距离测试页显示模式: 0=归一化 1=原始ADC 2=峰值保持 3=编码器自检 4=编码器引脚 */
 extern uint8_t Menu_DistRaw;
 
-/* 速度控制方式: 【固定为 PWM 开环 35%】, 菜单里不再可调。
- * 变量与宏保留是为了兼容 Motor.c 的执行路径与主机端仿真。 */
-#define SPD_MODE_CL   0
-#define SPD_MODE_OL   1
+/* 速度控制方式: 【固定为 PWM 开环 20%】, 菜单里不再可调。
+ * 变量保留是为了兼容 Motor.c 的执行路径与主机端仿真。 */
 #define SPD_MODE_PWM  2
 extern uint8_t Menu_SpdMode;
 

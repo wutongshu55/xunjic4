@@ -177,7 +177,7 @@ void TIM1_UP_IRQHandler(void)
         /* 4. 运行控制 */
         if (Menu_Running == 1)
         {
-            /* 车速固定 35% PWM: Speed_Basic 只承载"等效速度"(350 = 名义值),
+            /* 车速固定 20% PWM: Speed_Basic 只承载"等效速度"(200 = 名义值),
              * 弯道/丢线/急弯的降速由 PID_Speed_Schedule 在此基础上缩放。 */
             Speed_Basic = SPEED_NOMINAL_MMS;
 

@@ -295,7 +295,7 @@ void PID_Calculate(void)
     Dly_Prev_H = eh_use;
     D_Filt  = D_Filt + (d_raw_h - D_Filt) * D_LPF;
 
-    /* 速度越低, 比例增益全额生效; Speed_Basic 现在固定 35% PWM 的等效速度 */
+    /* 速度越低, 比例增益全额生效; Speed_Basic 现在固定 20% PWM 的等效速度 */
     speed_ratio = (float)Speed_Basic / 700.0f;
     if (speed_ratio > 1.0f) speed_ratio = 1.0f;
     if (speed_ratio < 0.0f) speed_ratio = 0.0f;

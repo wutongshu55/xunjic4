@@ -20,7 +20,7 @@ uint8_t  Menu_ZigEn       = 1;
 /* 距离测试页显示模式 0=归一化 1=原始 2=峰值 3=编码器 4=编码器引脚 */
 uint8_t  Menu_DistRaw     = 0;
 
-/* 速度控制方式: 【固定 35% PWM 开环】, 不再可选(车速选择已删除)。
+/* 速度控制方式: 【固定 20% PWM 开环】, 不再可选(车速选择已删除)。
  * 变量保留是为了让 Motor.c 的执行路径与主机端仿真正常工作。 */
 uint8_t  Menu_SpdMode     = SPD_MODE_PWM;
 
@@ -176,6 +176,54 @@ void Menu_KeyHandler(uint8_t key)
     }
 }
 
+/* ------------------------------------------------------------
+ *  Kp / Kd / Lag 三页共用布局(16x4), 原来三页各写一遍, 合并后少 30 行:
+ *    行2: 标题 + 步进提示
+ *    行3: PID 页 = 误差 E / D 项 / 航向 Y;  Lag 页 = 比例 R / 实际延迟 K
+ *    行4: 参数值 + 输出差速 Dl
+ * ------------------------------------------------------------ */
+static void Menu_TuneLabels(uint8_t page)
+{
+    if (page == 6)
+    {
+        OLED_ShowString(2, 1, "Lag x100 K3-/K4+");
+        OLED_ShowString(3, 1, "R");
+        OLED_ShowString(3, 6, "K");
+        OLED_ShowString(4, 1, "Lag:");
+    }
+    else
+    {
+        OLED_ShowString(2, 1, (page == 3) ? "Kp x10  K3-/K4+" : "Kd x10  K3-/K4+");
+        OLED_ShowString(3, 1, "E");
+        OLED_ShowString(3, 7, "D");
+        OLED_ShowString(3, 11, "Y");
+        OLED_ShowString(4, 1, (page == 3) ? "Kp:" : "Kd:");
+    }
+    OLED_ShowString(4, 9, "Dl");
+}
+
+static void Menu_TuneValues(uint8_t page)
+{
+    if (page == 6)
+    {
+        uint32_t lag = (uint32_t)(Lag_Ratio * 100.0f + 0.5f);
+
+        OLED_ShowNum(3, 2, lag, 3);          /* 前瞻比例 ×100 */
+        OLED_ShowNum(3, 7, Lag_Cycles, 3);   /* 当前实际延迟周期 */
+        OLED_ShowNum(4, 5, lag, 3);
+    }
+    else
+    {
+        float k = (page == 3) ? kp : kd;
+
+        OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
+        OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
+        OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
+        OLED_ShowNum(4, 5, (uint32_t)(k * 10.0f + 0.5f), 3);
+    }
+    OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
+}
+
 /* 显示菜单页 - 首次画标签, 之后只更新数字 */
 void Menu_Display(void)
 {
@@ -185,15 +233,19 @@ void Menu_Display(void)
         OLED_ShowString(1, 1, "== Menu ===");
         switch (Menu_Page)
         {
-            case MENU_PAGE_START: /* 发车(第 1 页) */
+            case MENU_PAGE_START: /* 发车页: 顺带显示三个可调参数, 不用逐页确认 */
                 OLED_ShowString(2, 1, "Start");
-                OLED_ShowString(3, 1, "K4: GO/STOP ");
-                OLED_ShowString(4, 1, "Run:          ");
+                OLED_ShowString(3, 1, "Kp");
+                OLED_ShowString(3, 6, "Kd");
+                OLED_ShowString(3, 11, "L");
+                OLED_ShowString(4, 1, "K4:GO");
                 break;
-            case 1: /* 标定 */
-                OLED_ShowString(2, 1, "Calib");
-                OLED_ShowString(3, 1, "0:fix 1:auto");
-                OLED_ShowString(4, 1, "MIN    MAX   ");
+            case 1: /* 标定: 当前模式 + 四路峰值(目标 3200~3600) */
+                OLED_ShowString(2, 1, "Calib  M");
+                OLED_ShowString(3, 1, "L");
+                OLED_ShowString(3, 7, "R");
+                OLED_ShowString(4, 1, "ML");
+                OLED_ShowString(4, 9, "MR");
                 break;
             case 2: /* 距离/编码器: 五种模式循环(KEY4 切换, KEY3 清零) */
                 if (Menu_DistRaw == 0)
@@ -242,19 +294,9 @@ void Menu_Display(void)
                     OLED_ShowString(4, 1, "CPR    E  M ");
                 }
                 break;
-            case 3: /* Kp: 显示横置误差 / D 项, 一边拧一边看 */
-                OLED_ShowString(2, 1, "Kp x10  K3-/K4+");
-                OLED_ShowString(3, 1, "E");
-                OLED_ShowString(3, 7, "D");
-                OLED_ShowString(4, 1, "Kp:");
-                OLED_ShowString(4, 9, "Dl");
-                break;
-            case 4: /* Kd: 同上 */
-                OLED_ShowString(2, 1, "Kd x10  K3-/K4+");
-                OLED_ShowString(3, 1, "E");
-                OLED_ShowString(3, 7, "D");
-                OLED_ShowString(4, 1, "Kd:");
-                OLED_ShowString(4, 9, "Dl");
+            case 3: /* Kp / Kd: 同一套布局 */
+            case 4:
+                Menu_TuneLabels(Menu_Page);
                 break;
             case 5: /* 模式页: 三个条目 */
                 OLED_ShowString(1, 1, "= Mode 1/3 =");
@@ -262,12 +304,8 @@ void Menu_Display(void)
                 OLED_ShowString(3, 1, " Sharp      ");
                 OLED_ShowString(4, 1, " Beep       ");
                 break;
-            case 6: /* 滞后页: 比例 + 当前实际延迟周期数 */
-                OLED_ShowString(2, 1, "Lag x100 K3-/K4+");
-                OLED_ShowString(3, 1, "R");
-                OLED_ShowString(3, 6, "K");
-                OLED_ShowString(4, 1, "Lag:");
-                OLED_ShowString(4, 9, "Dl");
+            case 6: /* 滞后页: 比例 + 实际延迟周期 */
+                Menu_TuneLabels(6);
                 break;
         }
         Menu_Inited = 1;
@@ -276,12 +314,18 @@ void Menu_Display(void)
     /* 只更新数值 */
     switch (Menu_Page)
     {
-        case MENU_PAGE_START: /* 发车 */
-            OLED_ShowString(4, 6, (Menu_Running == 1) ? "RUN " : "IDLE");
+        case MENU_PAGE_START: /* 发车: Kp / Kd / Lag 一览 + 运行状态 */
+            OLED_ShowNum(3, 3,  (uint32_t)(kp * 10.0f + 0.5f), 3);
+            OLED_ShowNum(3, 8,  (uint32_t)(kd * 10.0f + 0.5f), 3);
+            OLED_ShowNum(3, 12, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
+            OLED_ShowString(4, 7, (Menu_Running == 1) ? "RUN " : "IDLE");
             break;
-        case 1: /* 标定: 显示左电感(通道3)的标定范围 */
-            OLED_ShowNum(4, 5, ADC_MIN[3], 4);
-            OLED_ShowNum(4, 12, ADC_MAX[3], 4);
+        case 1: /* 标定: 模式 0=固定 1=自动 + 四路 MAX 峰值 */
+            OLED_ShowNum(2, 9,  Menu_CalibMode, 1);
+            OLED_ShowNum(3, 3,  ADC_MAX[3], 4);   /* L  PA7 */
+            OLED_ShowNum(3, 9,  ADC_MAX[0], 4);   /* R  PA4 */
+            OLED_ShowNum(4, 4,  ADC_MAX[2], 4);   /* ML PA6 */
+            OLED_ShowNum(4, 12, ADC_MAX[1], 4);   /* MR PA5 */
             break;
         case 2: /* 距离/编码器 */
             if (Menu_DistRaw == 0)
@@ -339,21 +383,9 @@ void Menu_Display(void)
                 OLED_ShowNum(4, 5, ADC_SatFlag, 2);      /* 饱和通道位图 */
             }
             break;
-        case 3: /* Kp: 横置误差 / D 项 / 航向角 / 参数 / 输出差速 */
-            OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
-            OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
-            OLED_ShowString(3, 11, "Y");
-            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
-            OLED_ShowNum(4, 5, (uint32_t)(kp * 10.0f + 0.5f), 3);
-            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
-            break;
-        case 4: /* Kd: 同上 */
-            OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
-            OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
-            OLED_ShowString(3, 11, "Y");
-            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
-            OLED_ShowNum(4, 5, (uint32_t)(kd * 10.0f + 0.5f), 3);
-            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
+        case 3: /* Kp / Kd */
+        case 4:
+            Menu_TuneValues(Menu_Page);
             break;
         case 5: /* 模式页: 选中标记 + 三个条目的值 */
             OLED_ShowNum(1, 8, (uint32_t)(Menu_Mode_Sel + 1), 1);
@@ -364,11 +396,8 @@ void Menu_Display(void)
             OLED_ShowNum(3, 12, Menu_ZigEn, 1);
             OLED_ShowNum(4, 12, Beep_Mode, 1);
             break;
-        case 6: /* 滞后页: R=比例(x100)  K=实际延迟周期数  Dl=输出差速 */
-            OLED_ShowNum(3, 2, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
-            OLED_ShowNum(3, 7, Lag_Cycles, 3);
-            OLED_ShowNum(4, 5, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
-            OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
+        case 6: /* 滞后页 */
+            Menu_TuneValues(6);
             break;
     }
 }
