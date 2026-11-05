@@ -161,15 +161,15 @@ void Menu_KeyHandler(uint8_t key)
             }
             break;
 
-        case 6: /* 滞后页: 前瞻延迟比例, 每按一次 0.05(5%) */
+        case 6: /* 滞后页: 0=不延迟(默认) 1=完全延迟, 每按一次 1 */
             if (key == 3)
             {
-                Lag_Ratio -= 0.05f;
+                Lag_Ratio -= 1.0f;
                 if (Lag_Ratio < 0.0f) Lag_Ratio = 0.0f;
             }
             else
             {
-                Lag_Ratio += 0.05f;
+                Lag_Ratio += 1.0f;
                 if (Lag_Ratio > 1.0f) Lag_Ratio = 1.0f;
             }
             break;

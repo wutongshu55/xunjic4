@@ -19,9 +19,7 @@ extern int8_t   Last_Dir;
 extern uint8_t  Sharp_State;
 extern uint16_t Sharp_Timer;
 extern uint16_t Sharp_ExitCnt;
-extern uint16_t Sharp_Lead;      /* >0 = 直角前瞻段(直行), 到 0 才猛打角 */
 extern int8_t   Sharp_Dir;
-extern float    Sharp_Yaw0;
 
 /* 无陀螺仪航向估计(编码器差速 -> 角速度 -> 航向角, 单位: 度)
  * 正 = 车头向右(顺时针)偏转。只在单次转弯内可信, 直道会自动回零。 */

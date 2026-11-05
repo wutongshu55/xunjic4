@@ -64,12 +64,10 @@ volatile int16_t Speed_Delta = 0;
  * 修正到达车轮时, 车正好走到当初看到偏差的位置, 车沿赛道本线走。
  * 补偿比例取 0.6 = "延后一点"而非完全几何对齐, 保留部分提前量。 */
 #define LOOKAHEAD_MM     120.0f  /* 电感到前轮轴的纵向距离(mm), 按实车量 */
-/* 前瞻补偿比例: 0 = 立即转弯, 1 = 完全几何对齐。
- * 【菜单第 7 页可调】默认 0.30 = 原 0.60 的一半。
- * 原因: 20% 车速下 0.60 约等于 360ms 延迟, 车已经冲出弯道、电感离开导线
- * 才把修正打到轮子上 -> 表现为"转弯永远晚半拍、转过头找不到线"。
- * 现场规则: 冲出去/切外弯 -> 调小; 直道来回摆、入弯切内角 -> 调大。 */
-volatile float Lag_Ratio = 0.30f;
+/* 前瞻补偿比例: 0 = 不延迟(立即用当前误差), 1 = 完全延迟(按 12cm 前瞻折算)。
+ * 【默认 0】延迟会让打角永远晚半拍, 现场表现为"转弯滞后、转过头找不到线"。
+ * 菜单第 7 页可切 0 / 1 做 A-B 对比, 默认 0 = 关闭延迟。 */
+volatile float Lag_Ratio = 0.0f;
 volatile uint8_t Lag_Cycles = 0;   /* 当前实际延迟周期数(菜单第 7 页显示) */
 #define DELAY_BUF_MAX     96     /* 误差队列长度(> DELAY_K_MAX) */
 #define DELAY_K_MAX       90     /* 最大延迟周期数(90 × 5ms = 450ms) */
@@ -98,35 +96,26 @@ int8_t   Last_Dir = 1;
 #define SHARP_V_TH       62.0f   /* 竖置误差达到此值也进入(弯道信号) */
 #define SHARP_CONFIRM    3       /* 连续 3 周期满足才进入 */
 #define SHARP_EXIT_ADC_MIN 400   /* 两个循迹横置电感都必须有足够信号 */
-#define SHARP_EXIT_ADC_DIFF 60   /* 原始 ADC 读数允许的相等误差 */
-#define SHARP_EXIT_CONFIRM 3     /* 连续 3 周期(15ms)满足条件才退出 */
-#define SHARP_MIN_TURN_TICK 10   /* 至少先锁方向转 50ms, 避免入口对称信号误出弯 */
+#define SHARP_EXIT_ADC_DIFF 80   /* 原始 ADC 读数允许的相等误差(放宽 = 更快判定回中) */
+#define SHARP_EXIT_CONFIRM 2     /* 连续 2 周期(10ms)满足就退出, 响应更快 */
+#define SHARP_MIN_TURN_TICK 6    /* 至少转 30ms, 避免入口瞬时对称误出弯 */
 #define SHARP_MAX_TICK   400     /* 最长锁 400 周期(2s), 防误判卡死 */
-#define SHARP_BIAS       450     /* 保持期间的固定转向量(编码器不可用时) */
 #define SHARP_SPEED_RATIO 0.45f  /* 急弯降速比例; SPEED_SCHEDULE_EN=0 时不生效 */
 
-/* ---- 直角弯两段式: 前瞻(直行) + 单轮急转 ----
- * 电感装在前轮前方, 会提前看到直角; 立刻打角就是提前转弯、半径大。
- * 第 1 段: 锁方向后先直行走完 SHARP_LEAD_MM, 等弯心到达车轮下方。
- *          这个值越大 = 前瞻越远、越晚打角、转弯半径越小。
- * 第 2 段: 在 Motor.c 里内轮降到接近停转、外轮保持基准, 车几乎绕内轮转。 */
-#define SHARP_LEAD_MM    100.0f  /* 直角前瞻距离(mm); 现场按"转晚了/转早了"调 */
-#define SHARP_LEAD_MAX   200     /* 前瞻计时上限(周期), 防速度估算异常时锁死 */
-
-/* ---- 直角弯转向力度: 用编码器估算航向, 辅助调节转向 ----
- * 编码器航向只用于调节转向力度, 不再因角度到位而提前停止转向;
- * 最终出弯由横置电感检测, 避免直角弯转角不足。 */
-#define SHARP_TURN_DEG   110.0f  /* 转向力度调节目标, 不是提前出弯角度 */
-#define SHARP_ANG_KP       5.5f  /* 角度误差(度) -> 差速 */
-#define SHARP_ANG_KD       1.2f  /* 角速度阻尼(度/秒) */
-#define SHARP_TURN_MIN   450.0f  /* 持续锁方向的最小差速, 增大直角弯转向力度 */
+/* ---- 急弯/直角: 纯传感器闭环, 不设固定角度、不定固定时长 ----
+ * 进入后只锁"方向"(防止邻线引起反向抽抽), 转向幅度由当前误差实时决定:
+ *   误差大 -> 转得多; 误差变小 -> 自动收油; 横置电感重新对称 -> 当场释放。
+ * 没有"先直行固定距离"的前瞻段, 也没有"必须转满 xx 度"的目标。 */
+#define SHARP_TURN_MIN   450.0f  /* 转向幅度下限, 保证直角能起得来 */
 
 uint8_t  Sharp_State = 0;
 uint16_t Sharp_Timer = 0;
 uint16_t Sharp_ExitCnt = 0;
-uint16_t Sharp_Lead = 0;       /* >0 = 前瞻直行段(每 5ms 减 1) */
 int8_t   Sharp_Dir = 1;
-float    Sharp_Yaw0 = 0.0f;    /* 进入急弯时的航向基准(度) */
+/* 进入确认期间的方向投票(累加): 单拍符号会被交叉线/瞬时对称带偏,
+ * 连续 SHARP_CONFIRM 个周期累加后取符号 = 多数投票, 减少"转反"。 */
+static float s_dir_vote_v = 0.0f;
+static float s_dir_vote_h = 0.0f;
 
 volatile float D_Filt   = 0.0f;   /* 横置 D 项(低通后), 菜单页显示 */
 static  float D_V_Filt_ = 0.0f;   /* 竖置 D 项(低通后) */
@@ -152,7 +141,7 @@ static uint8_t Ev_Idx = 0;
  *    2) 没有绝对参考, 直道会漂 -> 非元素期间每 5ms 向 0 衰减 0.2%,
  *       等价于"以当前车头方向为零点"。
  * ============================================================ */
-#define WHEEL_TRACK_MM   150.0f   /* 左右轮中心距(mm), 按实车量 */
+#define WHEEL_TRACK_MM   135.0f   /* 左右轮中心距(mm), 实测 13~14cm 取中值 */
 #define YAW_MIN_SPEED     60.0f   /* 平均轮速低于此值不积分(量化噪声太大) */
 #define YAW_LPF            0.45f  /* 角速度一阶低通 */
 
@@ -358,7 +347,6 @@ void PID_Sharp_Check(void)
         Sharp_State = 0;
         Sharp_Timer = 0;
         Sharp_ExitCnt = 0;
-        Sharp_Lead = 0;
         return;
     }
 
@@ -368,7 +356,6 @@ void PID_Sharp_Check(void)
         Sharp_State = 0;
         Sharp_Timer = 0;
         Sharp_ExitCnt = 0;
-        Sharp_Lead = 0;
         return;
     }
 
@@ -378,46 +365,44 @@ void PID_Sharp_Check(void)
         if ((ah > SHARP_TH) || (av > SHARP_V_TH))
         {
             if (Sharp_Timer < 60000) Sharp_Timer++;
+
+            /* 方向投票: 确认期内每个周期都累加。单拍符号会被
+             * 交叉导线/入口瞬时对称带偏, 累加后取符号 = 多数投票。 */
+            s_dir_vote_v += Error_V;
+            s_dir_vote_h += Error_H;
+
             if (Sharp_Timer >= SHARP_CONFIRM)
             {
                 Sharp_State = 1;
                 Sharp_Timer = 0;
                 Sharp_ExitCnt = 0;
-                Sharp_Yaw0 = Yaw_Deg;   /* 记下进入时的航向, 用于调节转向力度 */
-                /* 前瞻段: 按距离折算周期数, 弯心到车轮下之前保持直行 */
-                if (Speed_Basic > 20)
-                {
-                    Sharp_Lead = (uint16_t)(SHARP_LEAD_MM /
-                                 ((float)Speed_Basic * 0.005f) + 0.5f);
-                }
-                else
-                {
-                    Sharp_Lead = SHARP_LEAD_MAX;
-                }
-                if (Sharp_Lead > SHARP_LEAD_MAX) Sharp_Lead = SHARP_LEAD_MAX;
-                /* 锁方向: 优先按竖置误差 —— 竖置看的是"前方弯往哪拐",
-                 * 指向性强, 不受直角入口交叉导线干扰;
-                 * 横置此时正被交叉线穿过, 符号不可信, 只作竖置无信号时的后备 */
-                if (av > 5.0f)     Sharp_Dir = (Error_V > 0.0f) ? 1 : -1;
-                else if (ah > 5.0f) Sharp_Dir = (Error_H > 0.0f) ? 1 : -1;
+                /* 锁方向: 用【累加投票】的符号, 而不是最后一拍的单点符号。
+                 * 竖置指向性强(看的是前方弯往哪拐, 抗交叉线), 累加有量就信它;
+                 * 竖置累加几乎为 0(入口瞬时对称)再退回横置。 */
+                if (fabsf(s_dir_vote_v) > 5.0f)
+                    Sharp_Dir = (s_dir_vote_v > 0.0f) ? 1 : -1;
+                else if (fabsf(s_dir_vote_h) > 5.0f)
+                    Sharp_Dir = (s_dir_vote_h > 0.0f) ? 1 : -1;
+
+                s_dir_vote_v = 0.0f;
+                s_dir_vote_h = 0.0f;
                 Beep_On(160);  /* 蜂鸣器标志: 听到长一声 = 进入弯道(锁方向慢转) */
             }
         }
         else
         {
             Sharp_Timer = 0;
+            s_dir_vote_v = 0.0f;    /* 特征中断, 投票重来 */
+            s_dir_vote_h = 0.0f;
         }
     }
     else
     {
         Sharp_Timer++;
-        if (Sharp_Lead > 0) Sharp_Lead--;   /* 前瞻直行段倒计时, 到 0 才打角 */
 
-        /* 出弯判据: 两个循迹横置电感读数接近且都超过原始 ADC 400。
-         * 传感器有噪声, 用 3 个控制周期确认; 确认期间仍保持转向。
-         * 前瞻段不许出弯, 否则刚看到弯就撒手。 */
-        if ((Sharp_Lead == 0) &&
-            (Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
+        /* 出弯判据(实时): 两路横置电感重新都压到线且基本对称 -> 当场释放。
+         * 不再等固定时间/固定角度, 赛道怎么变就怎么跟。 */
+        if ((Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
             (ADC_Value[3] >= SHARP_EXIT_ADC_MIN) &&
             (ADC_Value[0] >= SHARP_EXIT_ADC_MIN) &&
             (abs((int)ADC_Value[3] - (int)ADC_Value[0]) <= SHARP_EXIT_ADC_DIFF))
@@ -428,7 +413,6 @@ void PID_Sharp_Check(void)
                 Sharp_State = 0;
                 Sharp_Timer = 0;
                 Sharp_ExitCnt = 0;
-                Sharp_Lead = 0;
                 PID_D_Reset();  /* 清 D 项: 出弯瞬间不许带尖峰 */
                 Beep_On(110);  /* 短一声 = 横置电感重新可靠循迹 */
             }
@@ -444,7 +428,6 @@ void PID_Sharp_Check(void)
             Sharp_State = 0;
             Sharp_Timer = 0;
             Sharp_ExitCnt = 0;
-            Sharp_Lead = 0;
             PID_D_Reset();
         }
     }
@@ -520,23 +503,14 @@ int16_t PID_Apply(int16_t delta)
     }
     else if ((HexDia_Flag == 0) && Sharp_State)
     {
-        if (Yaw_Valid)
-        {
-            /* 航向用于控制转向力度; 达到目标角后仍维持最小差速,
-             * 直到横置电感确认重新压在线上。 */
-            float turned = (Yaw_Deg - Sharp_Yaw0) * (float)Sharp_Dir;
-            float rem    = SHARP_TURN_DEG - turned;
-            float u = SHARP_ANG_KP * rem
-                    - SHARP_ANG_KD * Yaw_Rate_Dps * (float)Sharp_Dir;
-            if (u < SHARP_TURN_MIN)   u = SHARP_TURN_MIN;
-            if (u > (float)DELTA_MAX) u = (float)DELTA_MAX;
-            out = (int16_t)((float)Sharp_Dir * u);
-        }
-        else
-        {
-            /* 编码器不可用: 锁方向持续转, 不让邻线引起反向抽动。 */
-            out = (int16_t)(Sharp_Dir * SHARP_BIAS);
-        }
+        /* 实时动态转向: 方向锁定(防邻线反抽), 幅度取当前 PD 输出的绝对值。
+         * 误差大 -> 转得多; 误差收小 -> 自动收油; 回中后由 Sharp_Check 当场释放。
+         * 不再有固定角度目标, 也不依赖编码器/航向。 */
+        float mag = fabsf((float)delta);
+
+        if (mag < SHARP_TURN_MIN) mag = SHARP_TURN_MIN;
+        if (mag > (float)DELTA_MAX) mag = (float)DELTA_MAX;
+        out = (int16_t)((float)Sharp_Dir * mag);
     }
 
     /* 赛道元素(十字/圆环)附加的转向偏置 */

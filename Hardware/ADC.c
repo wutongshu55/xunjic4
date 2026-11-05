@@ -82,6 +82,10 @@ uint8_t ADC_AutoCalib = 0;
 /* 标定状态: 0=未标定 1=标定中 2=标定完成 */
 uint8_t Calib_State = 0;
 
+/* 手动标定持续时长: 按 KEY3 后采集这么久自动锁定, 不用再按一次 */
+#define ADC_CALIB_MS   3000
+static uint16_t s_calib_ms = 0;
+
 /* 峰值保持: 调电位器时用它读"十字/环岛处的峰值"(见优化说明第四步)。
  * 按菜单 Dist 页的 KEY3 清零。 */
 volatile uint16_t ADC_Peak[4] = {0, 0, 0, 0};
@@ -337,6 +341,8 @@ void ADC_Calibrate(void)
         {
             if (ADC_Value[i] > ADC_MAX[i]) ADC_MAX[i] = ADC_Value[i];
             if (ADC_Value[i] < ADC_MIN[i] || ADC_MIN[i] == 0) ADC_MIN[i] = ADC_Value[i];
+            /* 防呆: 量程至少 200。否则分母趋 0, 归一化会被拉到满量程 */
+            if (ADC_MAX[i] < ADC_MIN[i] + 200) ADC_MAX[i] = ADC_MIN[i] + 200;
         }
         else if (ADC_AutoCalib)
         {
@@ -363,6 +369,13 @@ void ADC_Calibrate(void)
         }
     }
 
+    /* 手动标定: 采集够 ADC_CALIB_MS 就自动锁定为"完成", 防止一直停在标定中 */
+    if (Calib_State == 1)
+    {
+        if (s_calib_ms < 60000) s_calib_ms += 5;
+        if (s_calib_ms >= ADC_CALIB_MS) Calib_State = 2;
+    }
+
     ADC_SatFlag = sat;
     if (sat != 0)
     {
@@ -370,7 +383,9 @@ void ADC_Calibrate(void)
     }
 }
 
-/* 清空标定值(重新标定用) */
+/* 清空标定值并开始重新标定(KEY3 调用)
+ * 注意: 必须把 Calib_State 置 1, 否则采集分支永远不进,
+ * MAX/MIN 一直为 0 -> 归一化分母为 1 -> 四路恒 100、误差恒 0(车"看不见线")。 */
 void ADC_Calib_Reset(void)
 {
     uint8_t i;
@@ -379,7 +394,8 @@ void ADC_Calib_Reset(void)
         ADC_MAX[i] = 0;
         ADC_MIN[i] = 0;
     }
-    Calib_State = 0;
+    Calib_State = 1;        /* 开始采集, ADC_CALIB_MS 后自动锁定 */
+    s_calib_ms  = 0;
     ADC_SatSeen = 0;
 }
 

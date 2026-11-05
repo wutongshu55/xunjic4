@@ -1,11 +1,12 @@
 ﻿#include "Common_headfile.h"
 
 /* ===================== 机械参数(换车/换电机改这里) =====================
- * 减速比 20:1, 轮子外径 48mm -> 周长 = 48 x PI = 150.80mm
+ * 减速比 20.459:1, 轮子外径 48mm -> 周长 = 48 x PI = 150.80mm
+ * 每轮圈计数 = PPR 11 x 边沿 2 x 20.459 ≈ 450
  */
 #define WHEEL_DIAMETER_MM   48.0f
 #define WHEEL_CIRCUMFERENCE (WHEEL_DIAMETER_MM * 3.14159265f)  /* 150.80mm */
-#define GEAR_RATIO          20    /* 减速比: 电机转 20 圈, 轮子转 1 圈 */
+#define GEAR_RATIO          20.459f  /* 减速比: 电机转 20.459 圈, 轮子转 1 圈 */
 #define ENCODER_PPR         11    /* 编码器单相每转脉冲数, 按实物改 */
 
 /* ===================== 测速方式(最重要, 决定测不测得到) =====================
@@ -21,8 +22,8 @@
 #define ENCODER_MODE   1
 
 /* 计数边沿(ENCODER_MODE = 1 时有效)
- *   2 = A 相上升沿 + 下降沿都数(TI1ED)【默认】一圈 440 计数, 分辨率翻倍
- *   1 = 只数上升沿(TI1FP1)             一圈 220 计数
+ *   2 = A 相上升沿 + 下降沿都数(TI1ED)【默认】一圈 450 计数, 分辨率翻倍
+ *   1 = 只数上升沿(TI1FP1)             一圈 225 计数
  */
 #define ENC_EDGE       2
 
@@ -46,22 +47,22 @@
 
 /* ===================== 每转计数(自动算, 不用手改) ===================== */
 #if (ENCODER_MODE == 1)
-  #define ENC_MULT       (ENC_EDGE)        /* 1 = 220/转, 2 = 440/转 */
+  #define ENC_MULT       (ENC_EDGE)        /* 1 = 225/转, 2 = 450/转 */
   #if (ENC_EDGE == 2)
     #define ENC_TRIG     TIM_TS_TI1F_ED    /* 双边沿 */
   #else
     #define ENC_TRIG     TIM_TS_TI1FP1     /* 单边沿(上升) */
   #endif
 #else
-  #define ENC_MULT       4                 /* TI12 四倍频 = 880/转 */
+  #define ENC_MULT       4                 /* TI12 四倍频 = 900/转 */
 #endif
 
 #define COUNTS_PER_REV   (ENCODER_PPR * ENC_MULT * GEAR_RATIO)
 
 /* 测速窗口: 计数每 5ms 累加一次, 每 20ms 才算一次速度。
  * 窗口越长量化误差越小, 但速度环滞后越大; 20ms(50Hz)对直流电机正好。
- * 以 440 计数/转为例: 1 个计数 = 150.8/440/0.02 = 17.1 mm/s,
- *   300mm/s 时窗口内有 17 个计数 -> 量化误差约 6%, 够速度环用。 */
+ * 以 450 计数/转为例: 1 个计数 = 150.8/450/0.02 = 16.8 mm/s,
+ *   300mm/s 时窗口内有 18 个计数 -> 量化误差约 6%, 够速度环用。 */
 #define SPEED_WIN_MS     20    /* 必须是 5 的整数倍 */
 #define SPEED_LPF        0.50f /* 测速一阶低通(0=不滤波, 1=不更新) */
 
@@ -73,7 +74,7 @@ volatile int32_t  Enc_Pulse_L     = 0;   /* 左累计(上电起, 不清零, 诊�
 volatile int32_t  Enc_Pulse_R     = 0;
 volatile int8_t   Enc_Dir_L       = 1;   /* 当前方向 +1 / -1 */
 volatile int8_t   Enc_Dir_R       = 1;
-volatile int32_t  Encoder_CPR     = COUNTS_PER_REV;  /* 每转计数, 显示用 */
+volatile int32_t  Encoder_CPR     = (int32_t)(COUNTS_PER_REV + 0.5f);  /* 每转计数(450), 显示用 */
 volatile int32_t  Encoder_Edge    = ENC_EDGE;        /* 1=只数上升沿 2=双沿 */
 volatile int32_t  Encoder_Method  = ENCODER_MODE;    /* 1=外部时钟计数 0=正交解码 */
 volatile int32_t  Speed_L_RPM     = 0;

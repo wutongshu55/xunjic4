@@ -457,11 +457,9 @@ static void S6_Sharp_Turn(void)
     FeedRaw(500, 200, 200, 600); PID_Sharp_Check();
     CHECK(Sharp_State == 1, "L/R 差值超过容差时不能退出急弯");
 
-    /* 达到阈值后连续确认 3 周期即退出, 不再直行等待 200ms。 */
+    /* 达到阈值后连续确认 2 周期即退出, 不再直行等待 */
     FeedRaw(500, 200, 200, 520); PID_Sharp_Check();
     CHECK(Sharp_State == 1, "出弯判据第 1 周期仍应保持转向");
-    FeedRaw(500, 200, 200, 520); PID_Sharp_Check();
-    CHECK(Sharp_State == 1, "出弯判据第 2 周期仍应保持转向");
     FeedRaw(500, 200, 200, 520); PID_Sharp_Check();
     CHECK(Sharp_State == 0, "两路横置电感均不低于 400 且接近时应立即退出");
 
@@ -683,7 +681,6 @@ static void S10_Delta_Shape_And_Yaw(void)
     Yaw_Valid = 1;
     Sharp_State = 1;
     Sharp_Dir = 1;
-    Sharp_Yaw0 = 0.0f;
     Yaw_Deg = 0.0f;
     for (i = 0; i < 6; i++) d = PID_Apply(0);
     printf("  直角弯 0度: 差速=%d (应 >=380 保底)\n", d);
@@ -710,10 +707,7 @@ static void S10_Delta_Shape_And_Yaw(void)
     CHECK(Sharp_State == 1, "达到电感出弯条件第 1 周期仍保持锁定");
     FeedRaw(500, 200, 200, 520);
     PID_Sharp_Check();
-    CHECK(Sharp_State == 1, "达到电感出弯条件第 2 周期仍保持锁定");
-    FeedRaw(500, 200, 200, 520);
-    PID_Sharp_Check();
-    CHECK(Sharp_State == 0, "电感满足阈值并确认后立即出弯");
+    CHECK(Sharp_State == 0, "电感满足阈值并确认(2 周期)后立即出弯");
 
     Sharp_State = 0;
     Yaw_Valid = 0;

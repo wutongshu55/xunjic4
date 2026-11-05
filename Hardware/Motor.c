@@ -33,10 +33,14 @@
  * 0.45 = 折中: 弯道降到 45% 时, 差速收成原来的 0.75。 */
 #define DELTA_SPEED_KEEP  0.45f
 
-/* 直角弯单轮急转: 内轮降到这个占空比(接近停转), 外轮保持基准,
- * 车几乎绕内轮转 -> 最小转弯半径。斜坡每 5ms 下降一档, 避免瞬间堵转。 */
+/* 急弯/直角: 内轮占空比随【当前误差】实时变化, 不按固定时间/角度。
+ *   误差 >= SHARP_INNER_REF -> 内轮降到 SHARP_INNER_DUTY(接近停, 半径最小)
+ *   误差收小 -> 内轮自动补速, 车头平滑摆正
+ * SHARP_INNER_STEP 是斜坡, 防止瞬间堵转。 */
 #define SHARP_INNER_DUTY  150
 #define SHARP_INNER_STEP  250.0f
+#define SHARP_INNER_REF   48.0f    /* 误差达到此值即"满舵" */
+#define SHARP_INNER_K     0.93f    /* 满舵时内轮只保留 7% 基准 */
 
 volatile int16_t Speed_Basic = 350;      /* mm/s */
 volatile int16_t Speed_Target_L = 0;     /* mm/s */
@@ -241,27 +245,39 @@ void CarMotor_Control(void)
         dl = base + d;
         dr = base - d;
 
-        /* ---- 直角弯两段式: 覆盖上面的对称差速, 换最小转弯半径 ----
-         * 电感提前看到直角, 立刻打角会提前转弯、半径大。
-         * 前瞻段(Sharp_Lead>0)保持直行, 弯心到车轮下之后,
-         * 内轮斜坡降到接近停转、外轮保持基准 -> 几乎绕内轮原地转。 */
+        /* ---- 急弯/直角: 内轮按当前误差实时缩放 ----
+         * 误差大(还在弯里) -> 内轮接近停转, 绕内轮转, 半径最小;
+         * 误差收小(快回中) -> 内轮自动补速, 车头平滑摆正。
+         * 不按固定时间、不按固定角度, 全靠电感反馈。 */
         if (Sharp_State && (HexDia_Flag == 0) && !Track_Straight)
         {
             static float s_inner = 0.0f;
+            float a = fabsf(Error_H);
+            float b = fabsf(Error_V);
+            float e = (a > b) ? a : b;
+            float k = e / SHARP_INNER_REF;
+            float want;
 
-            if (Sharp_Lead > 0)
+            if (k > 1.0f) k = 1.0f;
+            if (s_inner <= 0.0f) s_inner = base;      /* 首次进入从基准起步 */
+
+            want = base * (1.0f - SHARP_INNER_K * k);
+            if (want < (float)SHARP_INNER_DUTY) want = (float)SHARP_INNER_DUTY;
+
+            /* 斜坡: 每 5ms 最多变化 STEP, 防止瞬间堵转/打滑 */
+            if (want < s_inner)
             {
-                s_inner = base;            /* 前瞻段直行, 并预置斜坡起点 */
-                dl = base;
-                dr = base;
+                s_inner -= SHARP_INNER_STEP;
+                if (s_inner < want) s_inner = want;
             }
             else
             {
-                s_inner -= SHARP_INNER_STEP;
-                if (s_inner < (float)SHARP_INNER_DUTY) s_inner = (float)SHARP_INNER_DUTY;
-                if (Sharp_Dir > 0) { dl = base; dr = s_inner; }  /* 左轮走、右轮停 */
-                else               { dl = s_inner; dr = base; }  /* 右轮走、左轮停 */
+                s_inner += SHARP_INNER_STEP;
+                if (s_inner > want) s_inner = want;
             }
+
+            if (Sharp_Dir > 0) { dl = base; dr = s_inner; }  /* 左轮走、右轮停 */
+            else               { dl = s_inner; dr = base; }  /* 右轮走、左轮停 */
         }
 
         if (dl > (float)PWM_DUTY_MAX) dl = (float)PWM_DUTY_MAX;
