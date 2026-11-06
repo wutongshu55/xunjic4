@@ -169,39 +169,40 @@ void ADC_GetValue(void)
     DMA_ClearFlag(DMA1_FLAG_TC1);
 }
 
+/* 去极值平均: 一次遍历求 sum / min / max, 减去一个最大和一个最小后取 18 个平均。
+ * 结果与"20 个样本插入排序后取中间 18 个"完全等价, 但不需要排序、
+ * 不搬移数据、不破坏采样窗口, 且是无 FPU 的纯整数运算。
+ * (参考开源电磁车的滑动平均/去极值抗噪做法, 省 Flash/RAM/CPU。) */
 void ADC_Filter(void)
 {
-    int16_t i, j, n, current;
-    int32_t ADC_Val_Sum[4] = {0, 0, 0, 0};
+    int16_t i, n;
+    int32_t sum[4];
+    uint16_t vmin[4], vmax[4];
 
     for (n = 0; n < 4; n++)
     {
-        for (i = 1; i < 20; i++)
+        uint16_t v0 = ADC_Dat[0][n];
+        sum[n]  = v0;
+        vmin[n] = v0;
+        vmax[n] = v0;
+    }
+
+    for (i = 1; i < 20; i++)
+    {
+        for (n = 0; n < 4; n++)
         {
-            current = ADC_Dat[i][n];
-            j = i - 1;
-            while (j >= 0 && ADC_Dat[j][n] > current)
-            {
-                ADC_Dat[j + 1][n] = ADC_Dat[j][n];
-                j = j - 1;
-            }
-            ADC_Dat[j + 1][n] = current;
+            uint16_t v = ADC_Dat[i][n];
+
+            sum[n] += v;
+            if (v < vmin[n]) vmin[n] = v;
+            if (v > vmax[n]) vmax[n] = v;
         }
     }
 
-    /* 去掉最低 1 个和最高 1 个, 取中间 18 个平均 */
-    for (i = 1; i < 19; i++)
+    for (n = 0; n < 4; n++)
     {
-        ADC_Val_Sum[0] += ADC_Dat[i][0];
-        ADC_Val_Sum[1] += ADC_Dat[i][1];
-        ADC_Val_Sum[2] += ADC_Dat[i][2];
-        ADC_Val_Sum[3] += ADC_Dat[i][3];
+        ADC_Value[n] = (uint16_t)((sum[n] - vmin[n] - vmax[n]) / 18);
     }
-
-    ADC_Value[0] = ADC_Val_Sum[0] / 18;
-    ADC_Value[1] = ADC_Val_Sum[1] / 18;
-    ADC_Value[2] = ADC_Val_Sum[2] / 18;
-    ADC_Value[3] = ADC_Val_Sum[3] / 18;
 }
 
 /* 单路归一化(浮点): (当前值 - 最小) / (最大 - 最小) * 100

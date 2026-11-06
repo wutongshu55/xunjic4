@@ -56,21 +56,16 @@ volatile int16_t Speed_Delta = 0;
 #define CURVE_TH1        12.0f
 #define CURVE_TH2        36.0f
 
-/* ---- 前瞻补偿: 电感装在前轮轴前方约 12cm ----
- * 传感器现在"看到"的偏差, 车轮还要走一段距离才到; 立刻打角就会提前转弯
- * (切内弯、出弯偏外)。开源项目的标准做法是【误差延迟队列】:
- * 把误差存进环形队列, 延迟 K 个控制周期(5ms)后再给 PD:
- *   K = 补偿比例 × 前瞻距离 / (车速 × 0.005s)
- * 修正到达车轮时, 车正好走到当初看到偏差的位置, 车沿赛道本线走。
- * 补偿比例取 0.6 = "延后一点"而非完全几何对齐, 保留部分提前量。 */
-#define LOOKAHEAD_MM     120.0f  /* 电感到前轮轴的纵向距离(mm), 按实车量 */
-/* 前瞻补偿比例: 0 = 不延迟(立即用当前误差), 1 = 完全延迟(按 12cm 前瞻折算)。
- * 【默认 0】延迟会让打角永远晚半拍, 现场表现为"转弯滞后、转过头找不到线"。
- * 菜单第 7 页可切 0 / 1 做 A-B 对比, 默认 0 = 关闭延迟。 */
+/* ---- 前瞻滞后(默认关闭): 一阶低通代替环形队列 ----
+ * 旧实现用 96 深度 float 环形队列(768B RAM), 每个控制周期还要做两次
+ * 非 2 次幂取模(软件除法); 默认 Lag_Ratio=0 时这些开销完全白费。
+ * 开源方案普遍用滑动平均/一阶低通抗噪: 只占 8B RAM、每周期两次乘加,
+ * 不会把"延迟"变成固定的死时间, 也不会拖慢 5ms 控制环。
+ *   lag=0 -> 直通(默认, 无延迟); lag=1 -> 强平滑。 */
+#define LOOKAHEAD_MM     120.0f  /* 电感前瞻距离, 仅用于菜单显示等效滞后周期 */
+#define LAG_DISP_MAX     90       /* 菜单 K 的显示上限(90 × 5ms = 450ms) */
 volatile float Lag_Ratio = 0.0f;
-volatile uint8_t Lag_Cycles = 0;   /* 当前实际延迟周期数(菜单第 7 页显示) */
-#define DELAY_BUF_MAX     96     /* 误差队列长度(> DELAY_K_MAX) */
-#define DELAY_K_MAX       90     /* 最大延迟周期数(90 × 5ms = 450ms) */
+volatile uint8_t Lag_Cycles = 0;   /* 等效滞后周期(菜单第 7 页显示) */
 
 /* ---- 速度调度总开关 ----
  * 0 = 全程恒定 20% PWM(当前要求): 弯道、丢线、出弯都不再加速/减速。
@@ -124,10 +119,8 @@ static  float D_V_Filt_ = 0.0f;   /* 竖置 D 项(低通后) */
 static  float Dly_Prev_H = 0.0f;  /* 延迟队列输出的上周期横置样本(求 D 用) */
 static  float Dly_Prev_V = 0.0f;  /* 延迟队列输出的上周期竖置样本(求 D 用) */
 
-static float Eh_Buf[DELAY_BUF_MAX];   /* 横置误差延迟队列(环形) */
-static float Ev_Buf[DELAY_BUF_MAX];   /* 竖置误差延迟队列(环形) */
-static uint8_t Eh_Idx = 0;
-static uint8_t Ev_Idx = 0;
+static float s_lag_h = 0.0f;   /* 横置误差的一阶低通状态 */
+static float s_lag_v = 0.0f;   /* 竖置误差的一阶低通状态 */
 
 /* ============================================================
  *  无陀螺仪航向估计 —— 用两个编码器的速度差当"电子陀螺"
@@ -218,29 +211,6 @@ void PID_Apply_Reset(void)
     PID_D_Reset();
 }
 
-/* 写入当前误差, 返回 k 个周期前的误差(k=0 时不延迟)。
- * D 项在【同一列延迟样本】上求差分, 保证 P/D 用的是同一时刻的信息。 */
-static float Err_Delay(float *buf, uint8_t *idx, float now, uint8_t k)
-{
-    uint8_t r;
-    float   old;
-
-    if (k == 0)
-    {
-        buf[*idx] = now;
-        *idx = (uint8_t)((*idx + 1) % DELAY_BUF_MAX);
-        return now;
-    }
-
-    /* 先读 k 周期前的样本, 再写入当前样本, 时序才对应得上 */
-    r = (uint8_t)((*idx + DELAY_BUF_MAX - k) % DELAY_BUF_MAX);
-    old = buf[r];
-
-    buf[*idx] = now;
-    *idx = (uint8_t)((*idx + 1) % DELAY_BUF_MAX);
-    return old;
-}
-
 /* ------------------------------------------------------------
  *  双 PD 计算 + 融合
  *    直道: Δ = kp*E_H + kd*dE_H     (菜单 kp/kd)
@@ -252,36 +222,37 @@ void PID_Calculate(void)
     float d_raw_h, d_raw_v;
     float kp_eff, kd_eff, speed_ratio;
     float dh, dv, wv;
-    float eh_use, ev_use, lag, k_float;
-    uint8_t k;
+    float eh_use, ev_use, lag, a, kf;
 
-    /* ---- 前瞻补偿: 按当前车速算延迟周期数 ----
-     * K = 补偿比例(Lag_Ratio) × 前瞻距离 / (车速 × 5ms)
-     * 车速 200mm/s、比例 0.30 时 ≈ 36 个周期(约 180ms)。
-     * 菜单第 7 页可在线改比例, 不用重新编译。 */
+    /* 一阶低通近似前瞻滞后: 0=直通(默认), 1=强平滑 */
     lag = Lag_Ratio;
     if (lag < 0.0f) lag = 0.0f;
     if (lag > 1.0f) lag = 1.0f;
+    a = 1.0f - 0.85f * lag;
 
+    s_lag_h += (Error_H - s_lag_h) * a;
+    s_lag_v += (Error_V - s_lag_v) * a;
+    eh_use = s_lag_h;
+    ev_use = s_lag_v;
+
+    /* 菜单 Lag 页的 K: 按前瞻距离折算的"等效滞后周期", 只用来显示,
+     * 上限 90 周期(450ms)沿用原队列上限, 避免低速时显示一个荒谬的大数 */
     if (lag == 0.0f)
     {
-        k = 0;
+        Lag_Cycles = 0;
     }
-    else if (Speed_Basic > 50)
+    else if (Speed_Basic <= 0)
     {
-        k_float = lag * LOOKAHEAD_MM / ((float)Speed_Basic * 0.005f);
-        if (k_float >= (float)DELAY_K_MAX) k = DELAY_K_MAX;
-        else k = (uint8_t)(k_float + 0.5f);
+        Lag_Cycles = LAG_DISP_MAX;
     }
     else
     {
-        k = DELAY_K_MAX;
+        kf = lag * LOOKAHEAD_MM / ((float)Speed_Basic * 0.005f);
+        if (kf > (float)LAG_DISP_MAX) kf = (float)LAG_DISP_MAX;
+        Lag_Cycles = (uint8_t)(kf + 0.5f);
     }
-    if (k > DELAY_K_MAX) k = DELAY_K_MAX;
-    Lag_Cycles = k;
 
-    /* ---- 横置(直道) PD: 误差先过前瞻延迟队列 ---- */
-    eh_use  = Err_Delay(Eh_Buf, &Eh_Idx, Error_H, k);
+    /* ---- 横置(直道) PD ---- */
     d_raw_h = eh_use - Dly_Prev_H;
     Dly_Prev_H = eh_use;
     D_Filt  = D_Filt + (d_raw_h - D_Filt) * D_LPF;
@@ -295,8 +266,7 @@ void PID_Calculate(void)
     kd_eff = kd * (1.0f + 0.35f * speed_ratio) * Track_Kd_Gain;
     dh = kp_eff * eh_use + kd_eff * D_Filt;
 
-    /* ---- 竖置(弯道) PD: 同样延迟, 与横置同节拍 ---- */
-    ev_use  = Err_Delay(Ev_Buf, &Ev_Idx, Error_V, k);
+    /* ---- 竖置(弯道) PD ---- */
     d_raw_v = ev_use - Dly_Prev_V;
     Dly_Prev_V = ev_use;
     D_V_Filt_ = D_V_Filt_ + (d_raw_v - D_V_Filt_) * D_LPF;

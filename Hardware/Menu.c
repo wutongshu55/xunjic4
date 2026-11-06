@@ -434,6 +434,24 @@ static char *Menu_RunTurnCode(void)
     return "F";
 }
 
+/* ---- 运行页增量刷新 ----
+ * 软件 I2C 刷新一个数字要几百微秒, 而 50ms 内多数数值并不变。
+ * 值没变就跳过, 把 CPU 时间还给按键扫描与主循环。
+ * 切进运行页时(Menu_RunInited=0)强制全刷一次。 */
+#define RUN_SLOTS 12
+static int32_t s_run_cache[RUN_SLOTS];
+static char    s_run_state = 0, s_run_turn = 0;
+static uint8_t s_run_valid = 0;
+
+static void Run_Num(uint8_t slot, uint8_t line, uint8_t col,
+                    int32_t v, uint8_t len, uint8_t sign)
+{
+    if (s_run_valid && s_run_cache[slot] == v) return;
+    s_run_cache[slot] = v;
+    if (sign) OLED_ShowSignedNum(line, col, v, len);
+    else      OLED_ShowNum(line, col, (uint32_t)v, len);
+}
+
 /* 运行时显示页(发车后) - 不清屏, 只更新数据位置
  *
  * 布局(16 列 x 4 行):
@@ -461,25 +479,41 @@ void Menu_RunDisplay(void)
         OLED_ShowString(4, 5,  "X");
         OLED_ShowString(4, 8,  "D");
         OLED_ShowString(4, 13, "F");
+        s_run_valid    = 0;      /* 标签重画后所有数值都要刷一遍 */
         Menu_RunInited = 1;
     }
 
-    /* 第1行: 四路电感归一化值(0~100) */
-    OLED_ShowNum(1, 2,  ADC_L,  3);
-    OLED_ShowNum(1, 7,  ADC_ML, 3);
-    OLED_ShowNum(1, 12, ADC_MR, 3);
+    /* 第1行: 左横置 / 中左竖置 / 中右竖置 归一化(0~100) */
+    Run_Num(0, 1, 2,  ADC_L,  3, 0);
+    Run_Num(1, 1, 7,  ADC_ML, 3, 0);
+    Run_Num(2, 1, 12, ADC_MR, 3, 0);
     /* 第2行: 右横置 + 循迹误差 + 综合场强 */
-    OLED_ShowNum(2, 2,  ADC_R, 3);
-    OLED_ShowSignedNum(2, 6, (int32_t)Error, 4);
-    OLED_ShowNum(2, 12, ADC_Strength, 2);
-    /* 第3行: 左轮实测 / 右轮实测 / 循迹差速(左右分开, 不再显示平均值) */
-    OLED_ShowSignedNum(3, 2,  Speed_L_mms, 3);
-    OLED_ShowSignedNum(3, 7,  Speed_R_mms, 3);
-    OLED_ShowSignedNum(3, 12, (int32_t)Speed_Delta, 3);
-    /* 第4行: 状态码 / 当前转向 / 十字计数 / 左轮占空比 / 速度故障码 */
-    OLED_ShowString(4, 2, Menu_RunStateCode());
-    OLED_ShowString(4, 4, Menu_RunTurnCode());
-    OLED_ShowNum(4, 6, Menu_CrossCount, 2);
-    OLED_ShowNum(4, 9, Duty_L, 4);
-    OLED_ShowNum(4, 14, Speed_Fault, 1);
+    Run_Num(3, 2, 2,  ADC_R, 3, 0);
+    Run_Num(4, 2, 6,  (int32_t)Error, 4, 1);
+    Run_Num(5, 2, 12, ADC_Strength, 2, 0);
+    /* 第3行: 左轮实测 / 右轮实测 / 循迹差速(左右分开) */
+    Run_Num(6, 3, 2,  Speed_L_mms, 3, 1);
+    Run_Num(7, 3, 7,  Speed_R_mms, 3, 1);
+    Run_Num(8, 3, 12, (int32_t)Speed_Delta, 3, 1);
+    /* 第4行: 状态码 / 转向码 / 十字计数 / 左轮占空比 / 故障码 */
+    {
+        char st = *Menu_RunStateCode();
+        char tn = *Menu_RunTurnCode();
+
+        if (!s_run_valid || st != s_run_state)
+        {
+            s_run_state = st;
+            OLED_ShowString(4, 2, Menu_RunStateCode());
+        }
+        if (!s_run_valid || tn != s_run_turn)
+        {
+            s_run_turn = tn;
+            OLED_ShowString(4, 4, Menu_RunTurnCode());
+        }
+    }
+    Run_Num(9,  4, 6,  Menu_CrossCount, 2, 0);
+    Run_Num(10, 4, 9,  Duty_L, 4, 0);
+    Run_Num(11, 4, 14, Speed_Fault, 1, 0);
+
+    s_run_valid = 1;
 }
