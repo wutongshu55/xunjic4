@@ -55,6 +55,8 @@ uint8_t        HexDia_Flag     = 0;
 uint8_t        Track_Straight  = 0;
 volatile float Error_H         = 0.0f;
 volatile float Error_V         = 0.0f;
+volatile float Error           = 0.0f;
+uint8_t        Lost_State      = 0;
 const int16_t  Speed_Level_MMS[3] = {300, 450, 750};
 const int16_t  Speed_Level_PWM[3] = {3000, 4500, 6400};
 
@@ -308,6 +310,23 @@ int main(void)
 
     Sharp_State = 0;
     Error_H = 0.0f;
+
+    /* ---- 11. 直道等速补偿: 右轮快 -> 压右轮、补左轮 ---- */
+    printf("\n[11] 直道等速补偿(编码器)\n");
+    Speed_Basic = SPEED_NOMINAL_MMS;
+    Speed_Delta = 0;
+    Error       = 0.0f;
+    {
+        int i;
+        for (i = 0; i < 200; i++)
+        {
+            Speed_L_mms = 180;
+            Speed_R_mms = 220;          /* 右轮快 40mm/s */
+            CarMotor_Control();
+        }
+    }
+    printf("  右轮快 40mm/s: 左 %d / 右 %d\n", Duty_L, Duty_R);
+    CHECK(Duty_L > Duty_R, "右轮快时应加大左轮/减小右轮: %d/%d", Duty_L, Duty_R);
 
     Menu_SpdMode = 0;
 

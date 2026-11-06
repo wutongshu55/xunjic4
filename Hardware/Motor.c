@@ -39,8 +39,21 @@
  * SHARP_INNER_STEP 是斜坡, 防止瞬间堵转。 */
 #define SHARP_INNER_DUTY  150
 #define SHARP_INNER_STEP  250.0f
-#define SHARP_INNER_REF   48.0f    /* 误差达到此值即"满舵" */
+#define SHARP_INNER_REF   56.0f    /* 误差达到此值即"满舵"(提高后 60° 弯不会一上来就打死) */
 #define SHARP_INNER_K     0.93f    /* 满舵时内轮只保留 7% 基准 */
+
+/* ---- 直道等速补偿(编码器) ----
+ * 直行时两轮目标占空比完全相同, 但电机特性/阻力/轮胎直径不完全一致,
+ * 车会慢慢往一侧偏。用实测速度差做慢积分: 跑得快的轮子压一点、慢的补一点,
+ * 只调整左右分配, 总占空比不变(车速不变)。
+ * 只在"直道 + 不在任何元素里"时积分, 免得弯道/环把补偿带偏。 */
+#define STRAIGHT_EQ_EN   1        /* 1=开 0=关(做对比用) */
+#define EQ_SIGN          1        /* 补偿方向反了(越补越偏)就改 -1 */
+#define EQ_KP            0.8f     /* (mm/s 速度差) -> 占空比 */
+#define EQ_KI            3.0f     /* 积分速度 */
+#define EQ_LIMIT       500.0f     /* 最大补偿量(占空比) */
+#define EQ_ERR_MAX      80.0f     /* 速度差超过此值视为异常, 不积分 */
+#define EQ_MIN_SPEED    30.0f     /* 平均速度太低不积分(量化噪声大) */
 
 volatile int16_t Speed_Basic = 350;      /* mm/s */
 volatile int16_t Speed_Target_L = 0;     /* mm/s */
@@ -55,6 +68,7 @@ volatile uint8_t Speed_Fault   = 0;      /* 0=正常 1=测速失效(已降级开
 
 static float   s_int_l = 0.0f;
 static float   s_int_r = 0.0f;
+static float   s_eq_int = 0.0f;    /* 直道等速补偿的积分 */
 static uint8_t s_div   = 0;
 
 /* 编码器极性自动纠正: 车轮向前, 计数却一直为负 -> 说明 A/B 相接反了。
@@ -136,11 +150,12 @@ void Motor_Out(int16_t L_Speed, int16_t R_Speed)
 /* 清积分: 停车/重新发车/切换闭环模式时调用, 避免带着旧积分冲出去 */
 void Speed_Loop_Reset(void)
 {
-    s_int_l = 0.0f;
-    s_int_r = 0.0f;
-    s_div   = 0;
-    Duty_L  = 0;
-    Duty_R  = 0;
+    s_int_l  = 0.0f;
+    s_int_r  = 0.0f;
+    s_eq_int = 0.0f;      /* 等速补偿一起清, 重新发车从零学 */
+    s_div    = 0;
+    Duty_L   = 0;
+    Duty_R   = 0;
 }
 
 /* 发车时调用: 清故障标志, 重新开始检测(编码器极性纠正结果保留) */
@@ -241,6 +256,33 @@ void CarMotor_Control(void)
          * 轮速比接近 4:1, 车在小半径里"原地急转"再甩出去。
          * 这就是现场"转弯角度太大 / 十字出口甩尾"的主因。 */
         d = (float)Speed_Delta * (1.0f - DELTA_SPEED_KEEP * (1.0f - ratio));
+
+#if STRAIGHT_EQ_EN
+        /* 直道等速: 用编码器把两轮实际速度拉平(只调分配, 不改车速) */
+        if ((fabsf(Error) < 20.0f) && !Sharp_State && !Track_Straight &&
+            (HexDia_Flag == 0) && !Lost_State)
+        {
+            float vr = (float)Speed_R_mms;
+            float vl = (float)Speed_L_mms;
+            float ev = (vr - vl) * (float)EQ_SIGN;      /* 右快为正 */
+
+            if ((fabsf(ev) < EQ_ERR_MAX) &&
+                (fabsf(vr) + fabsf(vl) > 2.0f * EQ_MIN_SPEED))
+            {
+                s_eq_int += EQ_KI * ev * 0.005f;
+                if (s_eq_int >  EQ_LIMIT) s_eq_int =  EQ_LIMIT;
+                if (s_eq_int < -EQ_LIMIT) s_eq_int = -EQ_LIMIT;
+            }
+            else
+            {
+                s_eq_int *= 0.98f;                      /* 数据不可信时缓慢释放 */
+            }
+
+            d += EQ_KP * ev + s_eq_int;
+            if (d >  EQ_LIMIT) d =  EQ_LIMIT;
+            if (d < -EQ_LIMIT) d = -EQ_LIMIT;
+        }
+#endif
 
         dl = base + d;
         dr = base - d;

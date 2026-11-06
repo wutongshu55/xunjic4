@@ -28,10 +28,20 @@ void All_Init(void)
     Beep_Init();
     Timer_Init();       /* 定时中断最后开启 */
 
-    /* 开机自检: 上电"嘀"一声(300ms, 有源蜂鸣器)。
-     * 听不到 -> 菜单第 6 页 Beep 改 1/2/0 逐个试;
-     * 上电一直长响 -> 极性反了, 改 2(低电平驱动)。 */
-    Beep_On(300);
+    /* ---- 开机自检: 依次试 高电平 / 低电平 / 方波, 每段 200ms(间隔 150ms) ----
+     * 按"哪一段响"直接确定蜂鸣器类型, 然后在菜单第 6 页设对应的 Beep 值:
+     *   第 1 段响(高电平) -> 有源高有效, 设 1(默认)
+     *   第 2 段响(低电平) -> 有源低有效, 设 2
+     *   第 3 段响(方波)   -> 其实是无源, 设 0
+     *   三段都不响        -> 硬件问题: PA8 焊点 / Q1(8050) / 蜂鸣器 5V 供电
+     * 自检期间屏幕还是黑的, 专心听即可; 结束后 PA8 回到静默(低)。 */
+    GPIO_SetBits(GPIOA, GPIO_Pin_8);    Delay_ms(200);   /* 1) 高电平 */
+    GPIO_ResetBits(GPIOA, GPIO_Pin_8);  Delay_ms(150);
+    Delay_ms(200);                                        /* 2) 低电平 */
+    GPIO_SetBits(GPIOA, GPIO_Pin_8);    Delay_ms(150);
+    Beep_Mode = 0;  Beep_On(200);       Delay_ms(320);   /* 3) 无源方波 */
+    Beep_Mode = 1;                                        /* 恢复默认高电平 */
+    GPIO_ResetBits(GPIOA, GPIO_Pin_8);
 
     OLED_Clear();
 }

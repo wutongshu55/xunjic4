@@ -437,10 +437,10 @@ static char *Menu_RunTurnCode(void)
 /* 运行时显示页(发车后) - 不清屏, 只更新数据位置
  *
  * 布局(16 列 x 4 行):
- *   L 55 ML 02 MR 02     四路电感归一化值(横置 L/R, 竖置 ML/MR)
+ *   L 55 ML 02 MR 02     左横置 / 中左竖置 / 中右竖置 归一化
  *   R 55 E+0012 S45      右横置 / 循迹误差 / 综合场强
- *   T300 A296 d+400      左轮目标速度 / 平均实际速度 / 循迹差速
- *   MRTFX03D4800F0       模式 / 转向 / 十字计数 / 左轮占空比 / 故障码
+ *   L180 R180 d+000      左轮实测 / 右轮实测 / 循迹差速(左右分开)
+ *   MSX03D2000F0         状态 / 转向 / 十字计数 / 左轮占空比 / 故障码
  */
 void Menu_RunDisplay(void)
 {
@@ -453,8 +453,8 @@ void Menu_RunDisplay(void)
         OLED_ShowString(2, 1,  "R");
         OLED_ShowString(2, 5,  "E");
         OLED_ShowString(2, 11, "S");
-        OLED_ShowString(3, 1,  "T");
-        OLED_ShowString(3, 6,  "A");
+        OLED_ShowString(3, 1,  "L");
+        OLED_ShowString(3, 6,  "R");
         OLED_ShowString(3, 11, "d");
         OLED_ShowString(4, 1,  "M");
         OLED_ShowString(4, 3,  "T");
@@ -472,10 +472,10 @@ void Menu_RunDisplay(void)
     OLED_ShowNum(2, 2,  ADC_R, 3);
     OLED_ShowSignedNum(2, 6, (int32_t)Error, 4);
     OLED_ShowNum(2, 12, ADC_Strength, 2);
-    /* 第3行: 左轮目标速度 / 平均实际速度 / 循迹差速(圈数已删除) */
-    OLED_ShowNum(3, 2,  Speed_Target_L, 3);
-    OLED_ShowNum(3, 7,  Speed_Avg_mms, 3);
-    OLED_ShowSignedNum(3, 11, (int32_t)Speed_Delta, 3);
+    /* 第3行: 左轮实测 / 右轮实测 / 循迹差速(左右分开, 不再显示平均值) */
+    OLED_ShowSignedNum(3, 2,  Speed_L_mms, 3);
+    OLED_ShowSignedNum(3, 7,  Speed_R_mms, 3);
+    OLED_ShowSignedNum(3, 12, (int32_t)Speed_Delta, 3);
     /* 第4行: 状态码 / 当前转向 / 十字计数 / 左轮占空比 / 速度故障码 */
     OLED_ShowString(4, 2, Menu_RunStateCode());
     OLED_ShowString(4, 4, Menu_RunTurnCode());

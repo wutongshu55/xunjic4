@@ -92,13 +92,15 @@ int8_t   Last_Dir = 1;
  *   退出: 左右横置电感原始值都不低于 400 且基本相等, 连续确认 3 周期;
  *   保险: 锁太久(2s)强制交还 PD, 防止误判卡死。
  */
-#define SHARP_TH         48.0f   /* 横置误差饱和阈值(调大 = 直角判定更严格) */
+#define SHARP_TH         56.0f   /* 横置误差饱和阈值(56: 60° 弯不再直接打死, 直角仍触发) */
 #define SHARP_V_TH       62.0f   /* 竖置误差达到此值也进入(弯道信号) */
 #define SHARP_CONFIRM    3       /* 连续 3 周期满足才进入 */
 #define SHARP_EXIT_ADC_MIN 400   /* 两个循迹横置电感都必须有足够信号 */
 #define SHARP_EXIT_ADC_DIFF 80   /* 原始 ADC 读数允许的相等误差(放宽 = 更快判定回中) */
 #define SHARP_EXIT_CONFIRM 2     /* 连续 2 周期(10ms)满足就退出, 响应更快 */
 #define SHARP_MIN_TURN_TICK 6    /* 至少转 30ms, 避免入口瞬时对称误出弯 */
+#define SHARP_EXIT_ERR     25.0f /* 误差已收小 = 基本摆正 -> 立刻收油(防转过头) */
+#define SHARP_EXIT_ERR_TICK 20   /* 至少转 100ms 才允许用误差判据退出 */
 #define SHARP_MAX_TICK   400     /* 最长锁 400 周期(2s), 防误判卡死 */
 #define SHARP_SPEED_RATIO 0.45f  /* 急弯降速比例; SPEED_SCHEDULE_EN=0 时不生效 */
 
@@ -403,9 +405,10 @@ void PID_Sharp_Check(void)
         /* 出弯判据(实时): 两路横置电感重新都压到线且基本对称 -> 当场释放。
          * 不再等固定时间/固定角度, 赛道怎么变就怎么跟。 */
         if ((Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
-            (ADC_Value[3] >= SHARP_EXIT_ADC_MIN) &&
-            (ADC_Value[0] >= SHARP_EXIT_ADC_MIN) &&
-            (abs((int)ADC_Value[3] - (int)ADC_Value[0]) <= SHARP_EXIT_ADC_DIFF))
+            (((ADC_Value[3] >= SHARP_EXIT_ADC_MIN) &&
+              (ADC_Value[0] >= SHARP_EXIT_ADC_MIN) &&
+              (abs((int)ADC_Value[3] - (int)ADC_Value[0]) <= SHARP_EXIT_ADC_DIFF)) ||
+             ((Sharp_Timer >= SHARP_EXIT_ERR_TICK) && (ah < SHARP_EXIT_ERR))))
         {
             if (Sharp_ExitCnt < 60000) Sharp_ExitCnt++;
             if (Sharp_ExitCnt >= SHARP_EXIT_CONFIRM)

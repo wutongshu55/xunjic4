@@ -11,17 +11,21 @@
 
 /* ===================== 测速方式(最重要, 决定测不测得到) =====================
  *
- * ENCODER_MODE = 1 【定时器外部时钟计数】默认
+ * ENCODER_MODE = 2 【A 相中断计数】默认
+ *     A 相每个边沿进一次 EXTI, 软件累加到 Enc_Pulse_L/R。
+ *     不依赖 TIM 从模式配置, 对极性/电平不敏感, 接线稍差也能计数,
+ *     排查"某个轮子速度明显偏低"时首选。中断优先级 3(低于 TIM1)。
+ *
+ * ENCODER_MODE = 1 【定时器外部时钟计数】
  *     TIM2/TIM4 退化成"纯脉冲计数器": A 相来一个边沿, CNT 就 +1,
- *     CPU 只在 5ms 中断里读一下差值。不依赖正交解码硬件,
- *     【只接 A 相一根线也能测速】—— 这是"速度始终为 0"时最该用的方案。
+ *     CPU 只在 5ms 中断里读差值。不开中断, 但依赖 TIM 配置正确。
  *
  * ENCODER_MODE = 0 【正交解码】TI12 四倍频, 需要 A/B 两相都正常,
  *     少一相(断线/虚焊/单相编码器)计数器就永远不动 -> 速度恒 0。
  */
-#define ENCODER_MODE   1
+#define ENCODER_MODE   2
 
-/* 计数边沿(ENCODER_MODE = 1 时有效)
+/* 计数边沿(ENCODER_MODE = 1 时有效; 模式 2 固定双边沿 = 450/转)
  *   2 = A 相上升沿 + 下降沿都数(TI1ED)【默认】一圈 450 计数, 分辨率翻倍
  *   1 = 只数上升沿(TI1FP1)             一圈 225 计数
  */
@@ -53,6 +57,8 @@
   #else
     #define ENC_TRIG     TIM_TS_TI1FP1     /* 单边沿(上升) */
   #endif
+#elif (ENCODER_MODE == 2)
+  #define ENC_MULT       2                 /* A 相双边沿中断计数 = 450/转(ENC_EDGE 固定 2) */
 #else
   #define ENC_MULT       4                 /* TI12 四倍频 = 900/转 */
 #endif
@@ -90,19 +96,30 @@ static int32_t  s_acc_r = 0;
 static float    s_flt_l = 0.0f;
 static float    s_flt_r = 0.0f;
 
+#if (ENCODER_MODE != 2)
 /* 硬件计数器上一次的读数(用差值, 不再每 5ms 清零, 避免漏掉恰好在清零瞬间的脉冲) */
 static uint16_t s_prev_l = 0;
 static uint16_t s_prev_r = 0;
+#endif
 
+#if (ENCODER_MODE == 2)
+/* 中断计数模式: 记上一次的 32 位软件计数值, 用来求 5ms 差值 */
+static int32_t s_prev32_l = 0;
+static int32_t s_prev32_r = 0;
+#endif
+
+#if (ENCODER_MODE == 1 && ENC_DIR_BY_B == 1)
 /* 方向投票(EXTI 里累加, 5ms 里结算) */
 static volatile int16_t s_vote_l = 0;
 static volatile int16_t s_vote_r = 0;
+#endif
 
 /* EXTI 风暴熔断: 5ms 窗口内中断超过 400 次(>80kHz)说明信号是噪声不是编码器,
  * 永久关掉 EXTI 降级为"方向恒正", 把 CPU 还给 TIM1(按键/电机控制) */
 static volatile uint16_t s_exti_cnt    = 0;
 volatile uint8_t         Enc_Dir_Fault = 0;
 
+#if (ENCODER_MODE != 2)   /* 模式 2 用 EXTI 计数, 不需要 TIM */
 /* ------------------------------------------------------------------
  * 定时器配置: 上拉输入 + 外部时钟计数
  * ------------------------------------------------------------------ */
@@ -151,6 +168,7 @@ static void Enc_CounterInit(TIM_TypeDef *TIMx, uint32_t tim_clk,
     TIM_SetCounter(TIMx, 0);
     TIM_Cmd(TIMx, ENABLE);
 }
+#endif
 
 #if (ENCODER_MODE == 1 && ENC_DIR_BY_B == 1)
 /* ------------------------------------------------------------------
@@ -259,8 +277,84 @@ static void Enc_DirExtiInit(void)
 }
 #endif
 
+#if (ENCODER_MODE == 2)
+/* ------------------------------------------------------------------
+ * 中断计数模式(ENCODER_MODE = 2):
+ *   A 相每个边沿进一次 EXTI, 软件累加到 Enc_Pulse_L/R。
+ * 相比外部时钟计数(模式 1), 不依赖 TIM 从模式配置, 对极性/电平不敏感,
+ * 接线稍差也能正常计数 —— 排查"某个轮子速度明显偏低"时优先用这个。
+ * 中断优先级 3, 低于 TIM1(2), 绝不饿死 5ms 控制。
+ * ------------------------------------------------------------------ */
+static void Enc_CountExtiInit(void)
+{
+    GPIO_InitTypeDef gpio;
+    EXTI_InitTypeDef exti;
+    NVIC_InitTypeDef nvic;
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB |
+                           RCC_APB2Periph_AFIO, ENABLE);
+
+    gpio.GPIO_Mode  = GPIO_Mode_IPU;          /* 编码器多为集电极开路, 必须上拉 */
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    gpio.GPIO_Pin   = GPIO_Pin_0;  GPIO_Init(GPIOA, &gpio);   /* 左 A */
+    gpio.GPIO_Pin   = GPIO_Pin_6;  GPIO_Init(GPIOB, &gpio);   /* 右 A */
+
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOB, GPIO_PinSource6);
+
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
+
+    exti.EXTI_Mode    = EXTI_Mode_Interrupt;
+    exti.EXTI_Trigger = EXTI_Trigger_Rising_Falling;   /* 双边沿 = 450 计数/转 */
+    exti.EXTI_LineCmd = ENABLE;
+    exti.EXTI_Line    = EXTI_Line0;  EXTI_Init(&exti);
+    exti.EXTI_Line    = EXTI_Line6;  EXTI_Init(&exti);
+
+    nvic.NVIC_IRQChannelCmd                = ENABLE;
+    nvic.NVIC_IRQChannelPreemptionPriority = 3;
+    nvic.NVIC_IRQChannelSubPriority        = 0;
+    nvic.NVIC_IRQChannel = EXTI0_IRQn;   NVIC_Init(&nvic);
+    nvic.NVIC_IRQChannel = EXTI9_5_IRQn; NVIC_Init(&nvic);
+}
+
+void EXTI0_IRQHandler(void)
+{
+    if (EXTI_GetITStatus(EXTI_Line0) != RESET)
+    {
+        Enc_Pulse_L++;                        /* 左 A 相一个边沿 */
+        if (s_exti_cnt < 60000) s_exti_cnt++;
+        EXTI_ClearITPendingBit(EXTI_Line0);
+    }
+}
+
+void EXTI9_5_IRQHandler(void)
+{
+    if (EXTI_GetITStatus(EXTI_Line6) != RESET)
+    {
+        Enc_Pulse_R++;                        /* 右 A 相一个边沿 */
+        if (s_exti_cnt < 60000) s_exti_cnt++;
+        EXTI_ClearITPendingBit(EXTI_Line6);
+    }
+}
+
+/* 5ms 内超过 400 次(>80kHz)说明是噪声不是编码器, 关掉 EXTI 保住控制中断 */
+static void Enc_CountWatchdog(void)
+{
+    if (s_exti_cnt > 400)
+    {
+        EXTI->IMR &= ~(uint32_t)(EXTI_Line0 | EXTI_Line6);
+        Enc_Dir_Fault = 1;
+    }
+    s_exti_cnt = 0;
+}
+#endif
+
 void Encoder_Init(void)
 {
+#if (ENCODER_MODE == 2)
+    /* 中断计数: 只用 A 相, 不占用 TIM2/TIM4 */
+    Enc_CountExtiInit();
+#else
     /* 左编码器: PA0 = A 相(计数), PA1 = B 相(方向) */
     Enc_CounterInit(TIM2, RCC_APB1Periph_TIM2, GPIOA, RCC_APB2Periph_GPIOA,
                     GPIO_Pin_0, GPIO_Pin_1);
@@ -269,8 +363,9 @@ void Encoder_Init(void)
     Enc_CounterInit(TIM4, RCC_APB1Periph_TIM4, GPIOB, RCC_APB2Periph_GPIOB,
                     GPIO_Pin_6, GPIO_Pin_7);
 
-#if (ENCODER_MODE == 1 && ENC_DIR_BY_B == 1)
+  #if (ENCODER_MODE == 1 && ENC_DIR_BY_B == 1)
     Enc_DirExtiInit();
+  #endif
 #endif
 }
 
@@ -292,16 +387,33 @@ uint8_t Encoder_ReadLevel(void)
  * 每 5ms 取一次计数差值, 每 SPEED_WIN_MS(20ms) 才算一次速度。 */
 void Encoder_Update(float dt)
 {
-    uint16_t cur;
     int16_t  dl, dr;
 
-    cur = (uint16_t)TIM_GetCounter(TIM2);
-    dl  = (int16_t)((uint16_t)(cur - s_prev_l));   /* 16 位回绕自动处理 */
-    s_prev_l = cur;
+#if (ENCODER_MODE == 2)
+    /* 中断计数: 32 位软件计数器求差值, 无回绕问题 */
+    {
+        int32_t now32 = Enc_Pulse_L;
+        dl = (int16_t)(now32 - s_prev32_l);
+        s_prev32_l = now32;
 
-    cur = (uint16_t)TIM_GetCounter(TIM4);
-    dr  = (int16_t)((uint16_t)(cur - s_prev_r));
-    s_prev_r = cur;
+        now32 = Enc_Pulse_R;
+        dr = (int16_t)(now32 - s_prev32_r);
+        s_prev32_r = now32;
+    }
+    Enc_CountWatchdog();
+#else
+    {
+        uint16_t cur;
+
+        cur = (uint16_t)TIM_GetCounter(TIM2);
+        dl  = (int16_t)((uint16_t)(cur - s_prev_l));   /* 16 位回绕自动处理 */
+        s_prev_l = cur;
+
+        cur = (uint16_t)TIM_GetCounter(TIM4);
+        dr  = (int16_t)((uint16_t)(cur - s_prev_r));
+        s_prev_r = cur;
+    }
+#endif
 
 #if (ENCODER_MODE == 1 && ENC_DIR_BY_B == 1)
     Enc_DirWatchdog();   /* EXTI 频率过高就熔断, 保住按键与控制中断 */
@@ -323,8 +435,10 @@ void Encoder_Update(float dt)
     Encoder_R_Count = dr;
     Encoder_L_Total += dl;
     Encoder_R_Total += dr;
-    Enc_Pulse_L     += dl;
+#if (ENCODER_MODE != 2)
+    Enc_Pulse_L     += dl;      /* 模式 2 由中断自己累加, 这里不能重复加 */
     Enc_Pulse_R     += dr;
+#endif
 
     s_acc_l += dl;
     s_acc_r += dr;
