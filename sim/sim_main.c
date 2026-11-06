@@ -66,8 +66,6 @@ volatile int16_t Speed_Basic = 5000;
 volatile int32_t Speed_L_mms = 0;
 volatile int32_t Speed_R_mms = 0;
 volatile int32_t Speed_Avg_mms = 0;
-int g_beep = 0;
-void Beep_On(uint16_t t) { g_beep += t; }
 
 /* ================= 测试脚手架 ================= */
 static int g_fail = 0, g_checks = 0;
@@ -646,11 +644,11 @@ static void S10_Delta_Shape_And_Yaw(void)
     /* 1) 斜率: 一拍不许从 0 跳到满舵 */
     Reset_State();
     d = PID_Apply(3000);
-    printf("  满舵请求: 第一拍=%d (应 <=100)\n", d);
-    CHECK(d > 0 && d <= 100, "差速应受斜率限制, 实际 %d", d);
+    printf("  满舵请求: 第一拍=%d (应 <=180)\n", d);
+    CHECK(d > 0 && d <= 180, "差速应受斜率限制, 实际 %d", d);
     for (i = 0; i < 20; i++) d = PID_Apply(3000);
-    printf("  满舵请求: 稳态=%d (应 900)\n", d);
-    CHECK(d == 900, "稳态应被限幅到 900, 实际 %d", d);
+    printf("  满舵请求: 稳态=%d (应 1000)\n", d);
+    CHECK(d == 1000, "稳态应被限幅到 1000, 实际 %d", d);
 
     /* 2) 十字直行: 没有编码器航向时, 老实压成 0 */
     Reset_State();
@@ -714,6 +712,35 @@ static void S10_Delta_Shape_And_Yaw(void)
     Yaw_Deg = 0.0f;
 }
 
+/* ================= S12 弯道分级 / 邻线抑制 / 转够了实时收油 ================= */
+static void S12_Curve_Grade(void)
+{
+    int i;
+
+    printf("\n[S12] 按角度分级 + 邻线瞬态抑制 + 转弯过程实时判断\n");
+    Reset_State();
+
+    /* 1) 旁边那根线只扫过一拍: 不该确认成弯, 也不该大范围转弯 */
+    CURVE_R(1.0f);
+    PID_Calculate();
+    printf("  单拍大误差: G=%d C=%d d=%d\n", Curve_Grade_Now, Curve_Conf_Now, Speed_Delta);
+    CHECK(Curve_Grade_Now == 0, "邻线瞬态不应确认成弯, G=%d", Curve_Grade_Now);
+    CHECK(abs(Speed_Delta) <= 350, "未确认的大误差差速应 <=350, 实际 %d", Speed_Delta);
+
+    /* 2) 同方向持续 = 真弯: 分级确认并放开差速 */
+    Reset_State();
+    for (i = 0; i < 10; i++) { CURVE_R(1.0f); PID_Calculate(); }
+    printf("  持续右弯: G=%d T=%d d=%d\n", Curve_Grade_Now, Curve_Turn_Now, Speed_Delta);
+    CHECK(Curve_Grade_Now >= 2, "持续大误差应判 90/110 级, G=%d", Curve_Grade_Now);
+    CHECK(abs(Speed_Delta) > 350, "确认后的弯应放开差速, 实际 %d", Speed_Delta);
+
+    /* 3) 误差回落 = 转够了, 转弯中状态当场释放 */
+    for (i = 0; i < 10; i++) { STRAIGHT(1.0f); PID_Calculate(); }
+    printf("  回中: G=%d T=%d d=%d\n", Curve_Grade_Now, Curve_Turn_Now, Speed_Delta);
+    CHECK(Curve_Turn_Now == 0, "误差回落应判定转够并收油");
+    CHECK(abs(Speed_Delta) < 350, "回中后不该还有大差速, 实际 %d", Speed_Delta);
+}
+
 int main(void)
 {
     printf("==============================================\n");
@@ -732,6 +759,7 @@ int main(void)
     S8_Peak_And_Saturation();
     S9_Track_State();
     S10_Delta_Shape_And_Yaw();
+    S12_Curve_Grade();
 
     printf("\n==============================================\n");
     printf(" checks=%d  failures=%d  -> %s\n", g_checks, g_fail, g_fail ? "FAIL" : "ALL PASS");

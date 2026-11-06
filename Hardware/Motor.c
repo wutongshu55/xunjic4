@@ -234,8 +234,8 @@ void CarMotor_Control(void)
     float dl, dr;
     float k, delta, tl, tr, al, ar, cap_l, cap_r;
 
-    /* ---- 方式二: 纯 PWM 开环(车速固定 20%, 现在是唯一入口) ----
-     * 基准占空比固定 PWM_BASE_DUTY(20%), 循迹差速按原量纲直接叠加,
+    /* ---- 方式二: 纯 PWM 开环(车速固定 35%, 现在是唯一入口) ----
+     * 基准占空比固定 PWM_BASE_DUTY(35%), 循迹差速按原量纲直接叠加,
      * 完全不进速度环。弯道降速仍然生效: 按调度后的比例缩放基准占空比
      * (Speed_Basic 已被 PID_Speed_Schedule 按 0.20~1.0 缩放过)。 */
     if (Menu_SpdMode == SPD_MODE_PWM)
@@ -392,7 +392,6 @@ void CarMotor_Control(void)
         s_low_ms    = 0;            /* 纠正后重新给 800ms 机会, 别马上判成失效 */
         s_grace_ms  = 800;
         Speed_Fault = 2;
-        Beep_On(300);
     }
 
     if (s_grace_ms > 0 && s_grace_ms >= 5) s_grace_ms -= 5;
@@ -420,7 +419,6 @@ void CarMotor_Control(void)
             Speed_Fault = 1;
             s_int_l     = 0.0f;
             s_int_r     = 0.0f;
-            Beep_On(400);
         }
     }
 

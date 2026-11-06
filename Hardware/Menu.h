@@ -8,11 +8,11 @@
 #define MENU_PAGE_START 0
 
 /* ============ 车速已固定, 不再可选 ============
- * 基准占空比固定 20%(PWM_BASE_DUTY), 全程恒速:
+ * 基准占空比固定 35%(PWM_BASE_DUTY), 全程恒速:
  * 弯道 / 丢线 / 出弯都不再变速(PID_Speed_Schedule 用开关 SPEED_SCHEDULE_EN 控制)。
  * 名义速度 SPEED_NOMINAL_MMS 只用于差速换算与"等效速度"显示。 */
-#define PWM_BASE_DUTY     2000   /* 固定基准占空比: 2000 = 20% */
-#define SPEED_NOMINAL_MMS  200   /* 名义速度(mm/s): 与 20% PWM 对应的等效值 */
+#define PWM_BASE_DUTY     3500   /* 固定基准占空比: 3500 = 35% */
+#define SPEED_NOMINAL_MMS  350   /* 名义速度(mm/s): 与 35% PWM 对应的等效值 */
 
 /* 圈数功能已【删除】: 不再计圈, 也不存在"跑满圈数自动停车"。
  * 唯一能让车停下来的方式 = 按 KEY4(或运行页按 KEY4 回发车页)。 */

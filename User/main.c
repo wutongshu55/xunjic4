@@ -171,10 +171,7 @@ void TIM1_UP_IRQHandler(void)
          *     给直角弯做角度封顶、给十字路口做航向锁定 */
         PID_Yaw_Update();
 
-        /* 3. 蜂鸣器计时 */
-        Beep_Tick();
-
-        /* 4. 运行控制 */
+        /* 3. 运行控制 */
         if (Menu_Running == 1)
         {
             /* 车速固定 20% PWM: Speed_Basic 只承载"等效速度"(200 = 名义值),

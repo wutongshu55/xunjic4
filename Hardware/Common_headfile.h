@@ -16,7 +16,6 @@
 #include "Ring_Judge.h"
 #include "Encoder.h"
 #include "Key.h"
-#include "Beep.h"
 #include "Menu.h"
 #include "All_Init.h"
 

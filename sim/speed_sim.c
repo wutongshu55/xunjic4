@@ -31,9 +31,7 @@ static void Plant_Step(float dt)
 }
 
 /* ---------------- 被测代码需要的桩 ---------------- */
-static int s_beep_cnt = 0;
 
-void Beep_On(uint16_t ms) { (void)ms; s_beep_cnt++; }
 
 static GPIO_TypeDef g_gpioa, g_gpiob;
 GPIO_TypeDef *GPIOA = &g_gpioa;
@@ -295,15 +293,15 @@ int main(void)
     Error_H = 0.0f;
 
     /* ---- 10. 急弯: 内轮按当前误差实时缩放(无固定时长/角度) ---- */
-    printf("\n[10] 急弯内轮按误差实时缩放(20%% 基准)\n");
-    Speed_Basic = SPEED_NOMINAL_MMS;    /* 200 -> 基准 2000 */
+    printf("\n[10] 急弯内轮按误差实时缩放(%d%% 基准)\n", PWM_BASE_DUTY / 100);
+    Speed_Basic = SPEED_NOMINAL_MMS;    /* 350 -> 基准 3500 */
     Sharp_State = 1;
     Sharp_Dir   = 1;                    /* 左轮走、右轮停 */
     Error = 60.0f; Error_H = 0.0f; Error_V = 0.0f;   /* 合成误差饱和 -> 内轮接近停 */
     Run(100, NULL);
     printf("  误差 60: 左 %d / 右 %d (右轮应接近停)\n", s_duty_a, s_duty_b);
-    CHECK(s_duty_a == 2000, "外轮应保持基准, 实际 %d", s_duty_a);
-    CHECK(s_duty_b == 150,  "内轮应降到接近停转, 实际 %d", s_duty_b);
+    CHECK(s_duty_a == PWM_BASE_DUTY, "外轮应保持基准 %d, 实际 %d", PWM_BASE_DUTY, s_duty_a);
+    CHECK(s_duty_b < 300,  "内轮应降到接近停转(基准7%%), 实际 %d", s_duty_b);
 
     Error = 20.0f;                      /* 快回中 -> 内轮自动补速 */
     Run(100, NULL);

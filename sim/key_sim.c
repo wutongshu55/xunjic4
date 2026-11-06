@@ -16,8 +16,6 @@ GPIO_TypeDef *GPIOB = &g_gpiob;
 uint8_t  Menu_Running = 0;
 volatile uint32_t Sys_Tick_ms = 0;
 
-static int g_beep_ms = 0;
-void Beep_On(uint16_t time_ms) { g_beep_ms += time_ms; }
 
 /* 引脚桩: g_pin = 0 无键, 1~4 表示对应按键按下 */
 static uint8_t g_pin = 0;
@@ -126,7 +124,7 @@ int main(void)
     Menu_Running = 1;
     g_pin = 4;
     Tick(50);                       /* 按住 50ms, 还没松开 */
-    printf("  按住 50ms 时: Running=%d (应为 0)  蜂鸣累计=%d\n", Menu_Running, g_beep_ms);
+    printf("  按住 50ms 时: Running=%d (应为 0)\n", Menu_Running);
     CHECK(Menu_Running == 0, "按下 50ms 内就应停车, 实际 Running=%d", Menu_Running);
 
     g_pin = 0;

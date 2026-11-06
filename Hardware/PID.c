@@ -17,10 +17,12 @@
  *  若以后改 W_OUT/W_IN 权重, 这些常数要按同一比例复查。
  * ============================================================ */
 
-volatile float kp = 12.0f;      /* 菜单第 4 页: 横置(直道) PID 的 Kp
-                                 * (11.0 × 1.09: 权重 4:1 -> 4:1.5 后纯横置误差
-                                 *  缩小了 9%, 等比放大补偿, 直道手感不变) */
-volatile float kd = 4.0f;       /* 菜单第 5 页: 横置(直道) PID 的 Kd (3.7 × 1.09) */
+/* 菜单第 4/5 页显示的是 ×10 值: 090 = 9.0
+ * 现场要求 P/D 都给 90(显示值), 即 9.0 / 9.0:
+ *   P 从 12 降到 9 -> 减小过冲("转弯幅度过大");
+ *   D 从 4 升到 9 -> 加大阻尼, 转过了能更快拉回, 直道更稳。 */
+volatile float kp = 9.0f;
+volatile float kd = 9.0f;
 volatile int16_t Speed_Delta = 0;
 
 /* ============ 双 PID: 横置管直道, 竖置管弯道 ============
@@ -33,24 +35,32 @@ volatile int16_t Speed_Delta = 0;
  */
 #define KP_V            16.0f   /* 弯道(竖置) PID 增益, 不进菜单 */
 #define KD_V            4.0f
-#define V_BLEND_TH      28.0f   /* 竖置场强达到此值(0~100)时完全用弯道 PID。
-                                 * 阈值越低弯道 PID 介入越早(竖置比重越大):
-                                 * 40=保守, 28=默认, 想再偏竖置就降到 20 */
+#define V_BLEND_TH      22.0f   /* 竖置场强达到此值(0~100)时完全用弯道 PID。
+                                 * 阈值越低弯道 PID 介入越早 -> 入弯不晚:
+                                 * 40=保守, 28=旧默认, 22=现在(35% 车速下更早看到弯)。
+                                 * 竖置对邻线不敏感, 调低比调高安全。 */
 
 /* D 项低通系数(横/竖各一路) */
 #define D_LPF            0.30f
 
-/* 差速上限("PWM@5000 等价"单位)。基准 20%(2000) 时 900 ≈ 45% 差速,
- * 直角弯转得动; 再大就会一侧轮子接近停转、车头瞬间甩过去。
- * 差速决定"车头转多快", 不是"转多远"。 */
-#define DELTA_MAX        900
+/* ---- 直线上降低【中间两个竖置电感 ML/MR】的比重 ----
+ * 直道上竖置读数多半是远端/邻线串扰, 让它们少参与打方向,
+ * 车主要按外侧横置 L/R 沿主线走; 误差一大(真检测到路线变化)
+ * 或竖置场强起来(进弯)立刻恢复全额, 不损失实时反应。 */
+#define STRAIGHT_V_TH     20.0f   /* 横/竖误差都小于此值才算直道 */
+#define STRAIGHT_V_SCALE   0.60f  /* 直道时竖置融合权重打六折 */
 
-/* 差速斜率限制(每个 5ms 周期允许的变化量, 单位同上)。
- * PD 算出来的值可能一拍从 +200 跳到 +900, 机械上就是"猛打方向盘";
- * 限制斜率后 0 -> 900 需要 45ms, 车头是"转过去"而不是"甩过去"。
- * 回落比上升快: 松开方向要果断, 防止回正太慢蹭到外侧。 */
-#define DELTA_SLEW_UP    100
-#define DELTA_SLEW_DN    180
+/* 转过了要能回来: 急弯里误差符号与锁方向相反且够大时立即释放锁方向 */
+#define SHARP_OVERSHOOT_TH 25.0f
+
+/* 差速总上限。35% 基准下 1000 ≈ 29% 差速, 内轮不会接近停转(不甩);
+ * 分档限幅见 DELTA_CAP_45/90/110, 那几个才是真正管"转弯幅度"的。 */
+#define DELTA_MAX        1000
+
+/* 差速斜率: 180 时 0 -> 1100 约 30ms, 路线一变立刻跟上;
+ * 回落比上升更快, 转过头能迅速反向回中。 */
+#define DELTA_SLEW_UP    180
+#define DELTA_SLEW_DN    240
 
 /* 弯道降速的两个拐点(误差绝对值): 调小 = 弯道判定更灵敏, 更早开始降速 */
 #define CURVE_TH1        12.0f
@@ -68,7 +78,7 @@ volatile float Lag_Ratio = 0.0f;
 volatile uint8_t Lag_Cycles = 0;   /* 等效滞后周期(菜单第 7 页显示) */
 
 /* ---- 速度调度总开关 ----
- * 0 = 全程恒定 20% PWM(当前要求): 弯道、丢线、出弯都不再加速/减速。
+ * 0 = 全程恒定 35% PWM(当前要求): 弯道、丢线、出弯都不再加速/减速。
  * 1 = 恢复按误差/元素的自动降速(旧行为)。
  * 关掉调度后, 下面 CURVE_TH / SHARP_SPEED_RATIO / LOST_SPEED_RATIO 都不生效。 */
 #define SPEED_SCHEDULE_EN 0
@@ -179,6 +189,133 @@ void PID_Yaw_Update(void)
     if (Yaw_Deg < -200.0f) Yaw_Deg = -200.0f;
 }
 
+/* ============================================================
+ *  按角度分级的弯道判定(45° / 90° / 110°) + 转弯过程实时判断
+ *
+ *  为什么要分级: 以前只用一个阈值 SHARP_TH, 45° 和 110° 用同一套力度,
+ *  结果 45° 打死、110° 又转不够。这里按【横置误差 |E_H|】分三档,
+ *  并且要求"同方向持续 N 周期"才确认 —— 旁边那根线扫过通常只有一两拍
+ *  或符号来回跳, 不会被当成真弯道打出大方向(邻线误判的根治点)。
+ *
+ *  转的角度够不够, 在【转的过程中】实时判断:
+ *    进入 90°/110° 后开 s_turn_active;
+ *    误差回落到 TURN_DONE_ERR 并连续 TURN_DONE_CNT 周期 -> 转够了, 立刻收油;
+ *    误差反向且够大 -> 转过了, 立刻结束, 交还 PD 反向拉回。
+ *  不使用固定时间、固定角度、固定前瞻段, 所以不会"转晚了/转过头回不来"。
+ * ============================================================ */
+#define CURVE_45_MIN     22.0f   /* >22 = 45° 级弯(轻弯) */
+#define CURVE_90_MIN     55.0f   /* >55 = 90° 级弯 */
+#define CURVE_110_MIN    80.0f   /* >80 = 110° 级弯(最急) */
+#define CURVE_CONFIRM    3       /* 同方向连续 3 周期(15ms)才确认真弯 */
+#define CURVE_HOLD       10      /* 确认后粘性保持 10 周期(50ms), 防状态抖 */
+#define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限: 杜绝大范围乱转 */
+#define DELTA_CAP_45     600     /* 45° 允许的差速上限 */
+#define DELTA_CAP_90     850     /* 90° 允许的差速上限 */
+#define DELTA_CAP_110    1000    /* 110° 允许的差速上限 */
+
+#define TURN_DONE_ERR    12.0f   /* 误差回落到这个以下 = 基本转够了 */
+#define TURN_DONE_CNT    3       /* 连续 3 周期(15ms)确认才收油 */
+#define TURN_BIAS_K      4.0f    /* 转弯中按剩余误差补一点方向 */
+#define TURN_BIAS_MAX    300
+#define TURN_MAX_TICK    400     /* 2s 保险, 防误判卡死 */
+
+/* 供菜单"弯道判定页"显示, 拍视频看数据用 */
+volatile uint8_t Curve_Grade_Now = 0;   /* 0=直道 1=45° 2=90° 3=110° */
+volatile uint8_t Curve_Turn_Now  = 0;   /* 1=转弯进行中(还没判定转够) */
+volatile uint8_t Curve_Conf_Now  = 0;   /* 当前同方向确认计数 */
+
+static uint8_t  s_curve_cnt   = 0;
+static uint8_t  s_curve_hold  = 0;
+static uint8_t  s_curve_grade = 0;
+static int8_t   s_curve_sign  = 0;
+static uint8_t  s_turn_active = 0;
+static uint8_t  s_turn_done   = 0;
+static int8_t   s_turn_dir    = 0;
+static uint16_t s_turn_tick   = 0;
+
+void PID_Curve_Reset(void)
+{
+    s_curve_cnt = s_curve_hold = s_curve_grade = 0;
+    s_curve_sign = 0;
+    s_turn_active = s_turn_done = 0;
+    s_turn_dir = 0;
+    s_turn_tick = 0;
+    Curve_Grade_Now = Curve_Turn_Now = Curve_Conf_Now = 0;
+}
+
+/* 每 5ms 在 PID_Calculate 里调用一次 */
+static void Curve_Update(float eh)
+{
+    float   a  = fabsf(eh);
+    int8_t  sg = (eh > 1.0f) ? 1 : ((eh < -1.0f) ? -1 : 0);
+    uint8_t g  = 0;
+
+    if      (a >= CURVE_110_MIN) g = 3;
+    else if (a >= CURVE_90_MIN)  g = 2;
+    else if (a >= CURVE_45_MIN)  g = 1;
+
+    if ((g > 0) && (sg != 0))
+    {
+        if (sg == s_curve_sign)
+        {
+            if (s_curve_cnt < 250) s_curve_cnt++;
+        }
+        else
+        {
+            s_curve_sign = sg;       /* 方向一变就重新数, 邻线抖动进不了确认 */
+            s_curve_cnt = 1;
+        }
+
+        if (s_curve_cnt >= CURVE_CONFIRM)
+        {
+            s_curve_grade = g;
+            s_curve_hold  = CURVE_HOLD;
+            if ((g >= 2) && !s_turn_active)
+            {
+                s_turn_active = 1;
+                s_turn_tick   = 0;
+                s_turn_done   = 0;
+                s_turn_dir    = sg;
+            }
+        }
+    }
+    else
+    {
+        s_curve_cnt  = 0;
+        s_curve_sign = 0;
+        if (s_curve_hold > 0) s_curve_hold--;
+        if (s_curve_hold == 0) s_curve_grade = 0;
+    }
+
+    /* ---- 转的过程中判断"够了没" ---- */
+    if (s_turn_active)
+    {
+        if (s_turn_tick < 60000) s_turn_tick++;
+
+        if (a < TURN_DONE_ERR)
+        {
+            if (s_turn_done < 250) s_turn_done++;
+        }
+        else
+        {
+            s_turn_done = 0;
+        }
+
+        if ((s_turn_done >= TURN_DONE_CNT) ||
+            (s_turn_tick >= TURN_MAX_TICK) ||
+            ((sg != 0) && (sg != s_turn_dir) && (a > 20.0f)))
+        {
+            s_turn_active = 0;
+            s_turn_done   = 0;
+            s_turn_tick   = 0;
+        }
+    }
+
+    Curve_Grade_Now = s_curve_grade;
+    Curve_Turn_Now  = s_turn_active;
+    Curve_Conf_Now  = s_curve_cnt;
+}
+
 /* 清 D 项: 十字/急弯结束后调用。
  * 否则 D 项带着区间内的跳变冲出尖峰, 表现就是"出路口猛甩一下"。 */
 void PID_D_Reset(void)
@@ -209,6 +346,7 @@ void PID_Apply_Reset(void)
 {
     s_delta_prev = 0;
     PID_D_Reset();
+    PID_Curve_Reset();   /* 发车时清掉上一次的弯道分级/转弯中状态 */
 }
 
 /* ------------------------------------------------------------
@@ -257,7 +395,7 @@ void PID_Calculate(void)
     Dly_Prev_H = eh_use;
     D_Filt  = D_Filt + (d_raw_h - D_Filt) * D_LPF;
 
-    /* 速度越低, 比例增益全额生效; Speed_Basic 现在固定 20% PWM 的等效速度 */
+    /* 速度越低, 比例增益全额生效; Speed_Basic 现在固定 35% PWM 的等效速度 */
     speed_ratio = (float)Speed_Basic / 700.0f;
     if (speed_ratio > 1.0f) speed_ratio = 1.0f;
     if (speed_ratio < 0.0f) speed_ratio = 0.0f;
@@ -276,7 +414,45 @@ void PID_Calculate(void)
     wv = ADC_V_StrengthF / V_BLEND_TH;
     if (wv > 1.0f) wv = 1.0f;
 
+    /* 直道上降低中间两个竖置电感的比重: 只按外侧横置 L/R 沿主线走。
+     * 误差一大或竖置场强起来(进弯)就不折减, 实时跟着路线变。 */
+    if ((fabsf(eh_use) < STRAIGHT_V_TH) && (fabsf(ev_use) < STRAIGHT_V_TH))
+    {
+        wv *= STRAIGHT_V_SCALE;
+    }
+
     Speed_Delta = (int16_t)(dh * (1.0f - wv) + dv * wv);
+
+    /* ---- 弯道分级 + 转弯过程实时判断 ---- */
+    Curve_Update(eh_use);
+
+    /* 90°/110° 转弯进行中: 按【剩余误差】实时补方向。
+     * 误差归零 -> 偏置消失(转够了); 误差反向 -> 偏置清零, PD 反向拉回(转过了)。 */
+    if (s_turn_active)
+    {
+        float bias = TURN_BIAS_K * eh_use;
+
+        if (bias * (float)s_turn_dir < 0.0f) bias = 0.0f;
+        if (bias >  TURN_BIAS_MAX) bias =  TURN_BIAS_MAX;
+        if (bias < -TURN_BIAS_MAX) bias = -TURN_BIAS_MAX;
+        Speed_Delta = (int16_t)((float)Speed_Delta + bias);
+    }
+
+    /* 分级限幅: 邻线/瞬态的大误差只给很小的差速, 绝不会"一闪就大范围转弯";
+     * 真弯按档位放开, 110° 给足, 45° 收着, 根治"转弯幅度过大"。 */
+    {
+        int16_t cap;
+
+        if (s_turn_active)                       cap = DELTA_CAP_110;
+        else if (s_curve_grade >= 3)              cap = DELTA_CAP_110;
+        else if (s_curve_grade == 2)              cap = DELTA_CAP_90;
+        else if (s_curve_grade == 1)              cap = DELTA_CAP_45;
+        else if (fabsf(eh_use) > CURVE_45_MIN)    cap = NEIGH_CAP;
+        else                                      cap = DELTA_CAP_45;
+
+        if (Speed_Delta >  cap) Speed_Delta =  cap;
+        if (Speed_Delta < -cap) Speed_Delta = -cap;
+    }
 }
 
 /* ------------------------------------------------------------
@@ -358,7 +534,6 @@ void PID_Sharp_Check(void)
 
                 s_dir_vote_v = 0.0f;
                 s_dir_vote_h = 0.0f;
-                Beep_On(160);  /* 蜂鸣器标志: 听到长一声 = 进入弯道(锁方向慢转) */
             }
         }
         else
@@ -371,6 +546,19 @@ void PID_Sharp_Check(void)
     else
     {
         Sharp_Timer++;
+
+        /* 转过了: 误差符号与锁方向相反且幅度明显 -> 当场释放,
+         * 交还普通 PD, 车能实时反向修正回到线上(不再一路转下去)。 */
+        if ((Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
+            (fabsf(Error_H) > SHARP_OVERSHOOT_TH) &&
+            ((Error_H * (float)Sharp_Dir) < 0.0f))
+        {
+            Sharp_State = 0;
+            Sharp_Timer = 0;
+            Sharp_ExitCnt = 0;
+            PID_D_Reset();
+            return;
+        }
 
         /* 出弯判据(实时): 两路横置电感重新都压到线且基本对称 -> 当场释放。
          * 不再等固定时间/固定角度, 赛道怎么变就怎么跟。 */
@@ -387,7 +575,6 @@ void PID_Sharp_Check(void)
                 Sharp_Timer = 0;
                 Sharp_ExitCnt = 0;
                 PID_D_Reset();  /* 清 D 项: 出弯瞬间不许带尖峰 */
-                Beep_On(110);  /* 短一声 = 横置电感重新可靠循迹 */
             }
         }
         else
@@ -476,14 +663,15 @@ int16_t PID_Apply(int16_t delta)
     }
     else if ((HexDia_Flag == 0) && Sharp_State)
     {
-        /* 实时动态转向: 方向锁定(防邻线反抽), 幅度取当前 PD 输出的绝对值。
-         * 误差大 -> 转得多; 误差收小 -> 自动收油; 回中后由 Sharp_Check 当场释放。
-         * 不再有固定角度目标, 也不依赖编码器/航向。 */
-        float mag = fabsf((float)delta);
+        /* 实时闭环: 直接用当前 PD 输出【含方向】。转过头时误差反向,
+         * 输出立刻跟着反向把车拉回线上, 不再被锁死方向回不来。
+         * 只在 PD 输出过小时按锁方向给一个最小转向量, 防止弯里停滞。 */
+        float d = (float)delta;
 
-        if (mag < SHARP_TURN_MIN) mag = SHARP_TURN_MIN;
-        if (mag > (float)DELTA_MAX) mag = (float)DELTA_MAX;
-        out = (int16_t)((float)Sharp_Dir * mag);
+        if (fabsf(d) < SHARP_TURN_MIN) d = (float)Sharp_Dir * SHARP_TURN_MIN;
+        if (d >  (float)DELTA_MAX) d =  (float)DELTA_MAX;
+        if (d < -(float)DELTA_MAX) d = -(float)DELTA_MAX;
+        out = (int16_t)d;
     }
 
     /* 赛道元素(十字/圆环)附加的转向偏置 */
@@ -502,7 +690,7 @@ int16_t PID_Apply(int16_t delta)
 /* ------------------------------------------------------------
  *  速度调度
  *
- *  当前要求: 全程恒定 20% PWM —— 弯道不减速、出弯不加速。
+ *  当前要求: 全程恒定 35% PWM —— 弯道不减速、出弯不加速。
  *  SPEED_SCHEDULE_EN = 0 时直接原样返回, 下面的分档逻辑全部旁路。
  *  想恢复"弯道自动降速"只改这一个开关, 不用动其它地方。
  * ------------------------------------------------------------ */
@@ -510,7 +698,7 @@ int16_t PID_Speed_Schedule(int16_t basic)
 {
 #if (SPEED_SCHEDULE_EN == 0)
     (void)basic;
-    return basic;                 /* 恒速: 20% PWM 一路到底 */
+    return basic;                 /* 恒速: 35% PWM 一路到底 */
 #else
     float a = fabsf(Error);
     float ratio = 1.0f;

@@ -100,7 +100,6 @@ void Key_Scan_5ms(void)
             if ((raw == 4) && (Menu_Running == 1))
             {
                 Menu_Running = 0;
-                Beep_On(100);
                 s_consumed = 1;      /* 这次按下到此为止, 不再产生事件 */
             }
         }

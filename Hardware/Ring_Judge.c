@@ -40,6 +40,12 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 #define CROSS_V_BASE_MIN 8     /* 竖置巡航基线高于此值时才启用"相对抬升"判断 */
 #define CROSS_V_RISE     1.8f  /* 竖置须达到自身巡航基线的 1.8 倍 */
 #define CROSS_BAL        45    /* 横置左右偏差(%)须 <= 45 才认十字 —— 见下方说明 */
+#define CROSS_ERR_MAX    35.0f /* 横置误差 > 35 = 正在转弯, 不认十字。
+                                * 90° 弯的交叉导线同样会让竖置抬头, 以前只靠
+                                * 横置对称性排除, 会误判成路口强制直行 120ms,
+                                * 表现就是"直角弯转弯延迟高 / 冲出去才打方向"。 */
+#define CROSS_V_STRONG   70    /* 竖置特别强 = 确定是交叉点, 放宽对称性 */
+#define CROSS_BAL_STRONG 60    /* 强竖置时允许的横置偏差上限 */
 #define CROSS_CONFIRM    4     /* 至少连续 4 周期(20ms)才算特征成立 */
 #define CROSS_GAP_MAX    5     /* 特征允许间断 5 周期, 防止中途断开重新计时 */
 #define CROSS_HOLD       24    /* 保持直行至少 24 周期(120ms) */
@@ -101,16 +107,27 @@ static uint8_t Cross_Pattern(void)
     float hsum = ADC_Lf + ADC_Rf;
     float hbias;
 
+    /* 横置误差大 = 车正在转弯, 绝不是十字(根治 90° 弯被强制直行导致转晚) */
+    if (fabsf(Error_H) > (float)CROSS_ERR_MAX) return 0;
+
     /* 竖置必须明显抬头: 这是复合布局下十字的核心特征 */
     if (v < (float)CROSS_V_MIN) return 0;
 
     /* 若竖置平时也有可观读数(基线偏高), 还要求相对自身基线明显抬升 */
     if (V_Base > (float)CROSS_V_BASE_MIN && v < V_Base * CROSS_V_RISE) return 0;
 
-    /* 横置必须有信息, 且在左右方向上基本对称(排除直角弯) */
+    /* 横置必须有信息, 且在左右方向上基本对称(排除直角弯)。
+     * 竖置特别强时放宽对称要求, 避免真实十字因轻微偏心被漏掉(没成绩)。 */
     if (hsum < 2.0f) return 0;
     hbias = fabsf(ADC_Lf - ADC_Rf) / hsum * 100.0f;
-    if (hbias > (float)CROSS_BAL) return 0;
+    if (v >= (float)CROSS_V_STRONG)
+    {
+        if (hbias > (float)CROSS_BAL_STRONG) return 0;
+    }
+    else if (hbias > (float)CROSS_BAL)
+    {
+        return 0;
+    }
 
     return 1;
 }
@@ -174,7 +191,6 @@ void Cross_Judge(void)
                 if (pat >= CROSS_CONFIRM)
                 {
                     Menu_CrossCount++;      /* 只是计数显示, 不参与控制 */
-                    Beep_On(70);
                     hold = CROSS_HOLD;
                     Cross_Stage = 2;
                     Cross_Timer = 0;
@@ -190,7 +206,6 @@ void Cross_Judge(void)
                     if (pat >= CROSS_CONFIRM)
                     {
                         Menu_CrossCount++;
-                        Beep_On(70);
                         hold = CROSS_HOLD;
                         Cross_Stage = 2;
                     }
@@ -310,7 +325,6 @@ void HexDia_Judge(void)
                 {
                     HexDia_Flag = 1;
                     HexDia_Timer = 0;
-                    Beep_On(110);
                 }
             }
             else
@@ -368,7 +382,6 @@ void HexDia_Judge(void)
                 HexDia_Timer = 0;
                 Track_Steer_Bias = 0;
                 Track_Speed_Ratio = 1.0f;
-                Beep_On(130);
             }
             break;
 

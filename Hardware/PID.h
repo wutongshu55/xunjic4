@@ -10,6 +10,12 @@ extern volatile uint8_t Lag_Cycles;   /* 当前延迟周期数(5ms/周期) */
 extern volatile int16_t Speed_Delta;
 extern volatile float D_Filt;
 
+/* 弯道分级/转弯过程实时状态(菜单"弯道判定页"显示, 拍视频看数据用) */
+extern volatile uint8_t Curve_Grade_Now;   /* 0直道 1=45° 2=90° 3=110° */
+extern volatile uint8_t Curve_Turn_Now;    /* 1=转弯进行中 */
+extern volatile uint8_t Curve_Conf_Now;    /* 同方向确认计数 */
+void PID_Curve_Reset(void);
+
 /* 丢线保护状态 */
 extern uint8_t  Lost_State;
 extern uint16_t Lost_Timer;

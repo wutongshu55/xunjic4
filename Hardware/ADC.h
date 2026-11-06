@@ -6,7 +6,7 @@
 /* 判定"压在线上"的整体场强阈值(0~100), 低于此值视为丢线 */
 #define TRACK_ONLINE_TH   12
 
-/* 硬件峰值上限: 十字/环岛处峰值应 3200~3600, 超过 3700 必须降增益 */
+/* 硬件峰值上限: 十字/环岛处峰值应 3200~3550, 超过 3700 必须降增益 */
 #define ADC_SAT_TH_VALUE  3700
 
 extern volatile uint16_t ADC_TempDat[4];
