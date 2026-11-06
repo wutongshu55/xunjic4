@@ -284,32 +284,40 @@ int main(void)
     CHECK(s_duty_a == PWM_BASE_DUTY / 2, "基准减半应按比例缩占空比, 实际 %d", s_duty_a);
     Speed_Basic = SPEED_NOMINAL_MMS;
 
-    /* 差速在 PWM 档也必须能左右分速 */
+    /* 差速在 PWM 档也必须能左右分速(用非直道误差屏蔽等速补偿, 只测纯差速) */
     printf("  直道差速 Speed_Delta=400 时左右占空比应分开\n");
+    Error_H = 50.0f;
     Speed_Delta = 400;
     Run(60, NULL);
     printf("  左 %d / 右 %d\n", s_duty_a, s_duty_b);
     CHECK(s_duty_a - s_duty_b == 800, "PWM 档差速应为 ±400: 左 %d 右 %d", s_duty_a, s_duty_b);
     Speed_Delta = 0;
+    Error_H = 0.0f;
 
     /* ---- 10. 急弯: 内轮按当前误差实时缩放(无固定时长/角度) ---- */
     printf("\n[10] 急弯内轮按误差实时缩放(20%% 基准)\n");
     Speed_Basic = SPEED_NOMINAL_MMS;    /* 200 -> 基准 2000 */
     Sharp_State = 1;
     Sharp_Dir   = 1;                    /* 左轮走、右轮停 */
-    Error_H = 60.0f; Error_V = 0.0f;    /* 误差饱和 -> 内轮接近停 */
+    Error = 60.0f; Error_H = 0.0f; Error_V = 0.0f;   /* 合成误差饱和 -> 内轮接近停 */
     Run(100, NULL);
     printf("  误差 60: 左 %d / 右 %d (右轮应接近停)\n", s_duty_a, s_duty_b);
     CHECK(s_duty_a == 2000, "外轮应保持基准, 实际 %d", s_duty_a);
     CHECK(s_duty_b == 150,  "内轮应降到接近停转, 实际 %d", s_duty_b);
 
-    Error_H = 20.0f;                    /* 快回中 -> 内轮自动补速 */
+    Error = 20.0f;                      /* 快回中 -> 内轮自动补速 */
     Run(100, NULL);
     printf("  误差 20: 左 %d / 右 %d (内轮应回升)\n", s_duty_a, s_duty_b);
     CHECK(s_duty_b > 900, "误差收小后内轮应自动补速, 实际 %d", s_duty_b);
 
+    /* E=0 时即使还在急弯锁定, 也不许再压内轮转圈 */
+    Error = 0.0f;
+    Run(100, NULL);
+    printf("  E=0: 左 %d / 右 %d (应相同)\n", s_duty_a, s_duty_b);
+    CHECK(s_duty_a == s_duty_b, "E=0 时两轮占空比应相同: %d/%d", s_duty_a, s_duty_b);
+
     Sharp_State = 0;
-    Error_H = 0.0f;
+    Error = 0.0f;
 
     /* ---- 11. 直道等速补偿: 右轮快 -> 压右轮、补左轮 ---- */
     printf("\n[11] 直道等速补偿(编码器)\n");
@@ -327,6 +335,13 @@ int main(void)
     }
     printf("  右轮快 40mm/s: 左 %d / 右 %d\n", Duty_L, Duty_R);
     CHECK(Duty_L > Duty_R, "右轮快时应加大左轮/减小右轮: %d/%d", Duty_L, Duty_R);
+
+    /* 离开直道后补偿偏置必须放掉, 不能带进弯变成转圈 */
+    Error_H = 50.0f;
+    Run(200, NULL);
+    printf("  离开直道: 左 %d / 右 %d (应相同)\n", Duty_L, Duty_R);
+    CHECK(Duty_L == Duty_R, "离开直道后不应残留补偿差速: %d/%d", Duty_L, Duty_R);
+    Error_H = 0.0f;
 
     Menu_SpdMode = 0;
 

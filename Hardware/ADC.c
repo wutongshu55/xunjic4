@@ -86,7 +86,7 @@ uint8_t Calib_State = 0;
 #define ADC_CALIB_MS   3000
 static uint16_t s_calib_ms = 0;
 
-/* 峰值保持: 调电位器时用它读"十字/环岛处的峰值"(见优化说明第四步)。
+/* 峰值保持: 调电位器时用它读"十字/环岛处的峰值"(见调车手册第二章)。
  * 按菜单 Dist 页的 KEY3 清零。 */
 volatile uint16_t ADC_Peak[4] = {0, 0, 0, 0};
 /* 本轮是否有通道饱和/顶到上限: bit0..3 对应 4 个通道 */

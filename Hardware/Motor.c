@@ -51,9 +51,11 @@
 #define EQ_SIGN          1        /* 补偿方向反了(越补越偏)就改 -1 */
 #define EQ_KP            0.8f     /* (mm/s 速度差) -> 占空比 */
 #define EQ_KI            3.0f     /* 积分速度 */
-#define EQ_LIMIT       500.0f     /* 最大补偿量(占空比) */
+#define EQ_LIMIT       250.0f     /* 最大补偿量(占空比), 不许大到大角度转圈 */
 #define EQ_ERR_MAX      80.0f     /* 速度差超过此值视为异常, 不积分 */
 #define EQ_MIN_SPEED    30.0f     /* 平均速度太低不积分(量化噪声大) */
+#define EQ_STRAIGHT_TH  12.0f     /* 横/竖误差都要小于此值才算直道 */
+#define EQ_LEAK          0.995f   /* 积分泄漏, 防止把错误偏置固化成转圈 */
 
 volatile int16_t Speed_Basic = 350;      /* mm/s */
 volatile int16_t Speed_Target_L = 0;     /* mm/s */
@@ -258,17 +260,23 @@ void CarMotor_Control(void)
         d = (float)Speed_Delta * (1.0f - DELTA_SPEED_KEEP * (1.0f - ratio));
 
 #if STRAIGHT_EQ_EN
-        /* 直道等速: 用编码器把两轮实际速度拉平(只调分配, 不改车速) */
-        if ((fabsf(Error) < 20.0f) && !Sharp_State && !Track_Straight &&
-            (HexDia_Flag == 0) && !Lost_State)
+        /* 直道等速: 用编码器把两轮实际速度拉平(只调分配, 不改车速)。
+         * 【判直道必须用横/竖各自误差】合成 Error 可能被横竖抵消成 0,
+         * 那时车其实还在弯里, 用 Error 判断会把补偿积分带偏并固化成恒定差速 -> 转圈。 */
+        if ((fabsf(Error_H) < EQ_STRAIGHT_TH) && (fabsf(Error_V) < EQ_STRAIGHT_TH) &&
+            !Sharp_State && !Track_Straight && (HexDia_Flag == 0) && !Lost_State)
         {
             float vr = (float)Speed_R_mms;
             float vl = (float)Speed_L_mms;
             float ev = (vr - vl) * (float)EQ_SIGN;      /* 右快为正 */
 
+            s_eq_int *= EQ_LEAK;                        /* 泄漏: 不给错误偏置留记忆 */
+
             if ((fabsf(ev) < EQ_ERR_MAX) &&
                 (fabsf(vr) + fabsf(vl) > 2.0f * EQ_MIN_SPEED))
             {
+                /* ev 与积分反向 = 补过头或 EQ_SIGN 反了 -> 快速释放, 不许越补越偏 */
+                if (ev * s_eq_int < 0.0f) s_eq_int *= 0.90f;
                 s_eq_int += EQ_KI * ev * 0.005f;
                 if (s_eq_int >  EQ_LIMIT) s_eq_int =  EQ_LIMIT;
                 if (s_eq_int < -EQ_LIMIT) s_eq_int = -EQ_LIMIT;
@@ -282,6 +290,10 @@ void CarMotor_Control(void)
             if (d >  EQ_LIMIT) d =  EQ_LIMIT;
             if (d < -EQ_LIMIT) d = -EQ_LIMIT;
         }
+        else
+        {
+            s_eq_int *= 0.98f;                          /* 离开直道就把偏置放掉 */
+        }
 #endif
 
         dl = base + d;
@@ -294,9 +306,9 @@ void CarMotor_Control(void)
         if (Sharp_State && (HexDia_Flag == 0) && !Track_Straight)
         {
             static float s_inner = 0.0f;
-            float a = fabsf(Error_H);
-            float b = fabsf(Error_V);
-            float e = (a > b) ? a : b;
+            /* 用【合成误差】, 与运行页 E 一致: E=0 就不该再压内轮。
+             * 旧实现用 max(|E_H|,|E_V|), 横竖抵消成 E=0 时仍会满舵 -> 原地转圈。 */
+            float e = fabsf(Error);
             float k = e / SHARP_INNER_REF;
             float want;
 
