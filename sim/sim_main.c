@@ -68,6 +68,8 @@ volatile int16_t Speed_Basic = 5000;
 /* PID.c 的航向估计读这两个量(宿主仿真里由测试用例直接写) */
 volatile int32_t Speed_L_mms = 0;
 volatile int32_t Speed_R_mms = 0;
+volatile int32_t Encoder_L_Total = 0;
+volatile int32_t Encoder_R_Total = 0;
 volatile int32_t Speed_Avg_mms = 0;
 
 /* ================= 测试脚手架 ================= */
@@ -763,6 +765,19 @@ static void S12_Curve_Grade(void)
     printf("  横置渐降: G=%d T=%d |E|=%.1f L+R=%.0f\n",
            Curve_Grade_Now, Curve_Turn_Now, fabsf(Error_H), ADC_Lf + ADC_Rf);
     CHECK(Curve_Grade_Now >= 2, "横置明显变小应提前判直角级, G=%d", Curve_Grade_Now);
+
+    /* 90° 档转到 680 计数(≈86°)必须收手, 不能一路转到 100° */
+    Reset_State();
+    Encoder_L_Total = 0;
+    Encoder_R_Total = 0;
+    for (i = 0; i < 10; i++) { Feed(20, 0, 0, 70, 1.0f); PID_Calculate(); }
+    CHECK(Curve_Turn_Now == 1, "应先进入 90° 转弯");
+    Encoder_R_Total = 680;
+    Feed(20, 0, 0, 70, 1.0f);
+    PID_Calculate();
+    printf("  680 计数封顶: T=%d (应 0)\n", Curve_Turn_Now);
+    CHECK(Curve_Turn_Now == 0, "转到 680 计数应收手, 实际 %d", Curve_Turn_Now);
+    Encoder_R_Total = 0;
 }
 
 /* ================= S13 转向极性 / 急弯回线 / MR补偿 / 停车监视 ================= */

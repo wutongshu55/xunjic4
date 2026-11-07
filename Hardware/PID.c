@@ -190,6 +190,13 @@ void PID_Yaw_Update(void)
 #define TURN_BLOCK_TICK  4       /* 转错后短暂消抖, 避免紧邻急弯被长时间屏蔽 */
 #define TURN_MAX_TICK    400     /* 2s 保险, 防误判卡死 */
 
+/* 转弯角度上限(编码器计数差): 两轮计数差 713 = 转 90°(轮距152mm/轮径48mm/450计数),
+ * 680 ≈ 86° —— 现场要求"十字/90° 少转一点", 转够 680 就收手, 不再继续加转向。
+ * 只作用于 45°/90° 档; 110° 大弯不受限。想让十字再少转就减到 620/600。 */
+#define TURN_ANGLE_COUNT 680
+/* 110° 档用更宽的封顶(≈124°, 980 计数), 否则真·大弯会被提前"转够"卡住 */
+#define TURN_ANGLE_COUNT_110 980
+
 /* 供菜单"弯道判定页"显示, 拍视频看数据用 */
 volatile uint8_t Curve_Grade_Now = 0;   /* 0=直道 1=45° 2=90° 3=110° */
 volatile uint8_t Curve_Turn_Now  = 0;   /* 1=转弯进行中(还没判定转够) */
@@ -209,6 +216,7 @@ static uint8_t  s_turn_block  = 0;
 static uint8_t  s_drop_cnt    = 0;   /* 横置骤降连续计数(防直道单拍误判直角) */
 static int8_t   s_turn_dir    = 0;
 static uint16_t s_turn_tick   = 0;
+static int32_t  s_turn_cnt0   = 0;   /* 进入转弯时的 (R累计-L累计), 算转过多少 */
 
 void PID_Curve_Reset(void)
 {
@@ -224,6 +232,7 @@ void PID_Curve_Reset(void)
     s_drop_cnt    = 0;
     s_turn_dir    = 0;
     s_turn_tick   = 0;
+    s_turn_cnt0   = 0;
     Curve_Grade_Now = Curve_Turn_Now = Curve_Conf_Now = Curve_Wrong_Now = 0;
     Curve_Turn_Dir = 0;
 }
@@ -363,6 +372,8 @@ static void Curve_Update(float eh)
         s_turn_done   = 0;
         s_turn_wrong  = 0;
         s_turn_away_seen = 0;
+        /* 记下进入时的左右轮累计差, 用来算"这次已经转了多少计数" */
+        s_turn_cnt0   = (int32_t)Encoder_R_Total - (int32_t)Encoder_L_Total;
         /* 转弯方向: 竖置在弯道上指向性最好(ML 强 -> 线在左 -> 左转 -> 差速为负)。
          * 横置符号偶尔会被外侧电感先激励而反, 所以竖置可信时以竖置为准。 */
         s_turn_dir = (sg != 0) ? (int8_t)-sg : (int8_t)-s_curve_sign;
@@ -379,6 +390,8 @@ static void Curve_Update(float eh)
     if (s_turn_active)
     {
         uint8_t lr_bal = 0;
+        int32_t cnt_d;
+        uint8_t angle_done;
 
         /* 左右两个电感已经基本一样(差比和回到 ±10 内) = 车头回到线上 = 转够了。
          * 用原始差比和而不是归一化差值: 后者在 MAX 标定偏低时会失真。 */
@@ -393,6 +406,14 @@ static void Curve_Update(float eh)
         }
 
         if (s_turn_tick < 60000) s_turn_tick++;
+
+        /* 已转计数 = |(R-L)当前 - 进入时|, 680 ≈ 86°。
+         * 只对 45°/90° 档封顶: 十字处被误判成弯, 最多转到这里就收手,
+         * 不会一路转到 100° 以上冲出去。110° 大弯不封顶。 */
+        cnt_d = ((int32_t)Encoder_R_Total - (int32_t)Encoder_L_Total) - s_turn_cnt0;
+        if (cnt_d < 0) cnt_d = -cnt_d;
+        angle_done = (cnt_d >= ((s_curve_grade >= 3) ? (int32_t)TURN_ANGLE_COUNT_110
+                                                      : (int32_t)TURN_ANGLE_COUNT)) ? 1 : 0;
 
         /* 必须保持横置信号有效, 防止两路都离线时把"误差为零"当成出弯。 */
         if (!Lost_State && s_turn_away_seen &&
@@ -428,7 +449,7 @@ static void Curve_Update(float eh)
             s_turn_tick   = 0;
             s_turn_block  = TURN_BLOCK_TICK;
         }
-        else if ((s_turn_done >= TURN_DONE_CNT) || (s_turn_tick >= TURN_MAX_TICK))
+        else if ((s_turn_done >= TURN_DONE_CNT) || angle_done || (s_turn_tick >= TURN_MAX_TICK))
         {
             s_turn_active = 0;
             s_turn_done   = 0;
