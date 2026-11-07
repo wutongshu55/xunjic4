@@ -50,9 +50,6 @@ volatile int16_t Speed_Delta = 0;
 #define STRAIGHT_V_TH     20.0f   /* 横/竖误差都小于此值才算直道 */
 #define STRAIGHT_V_SCALE   0.60f  /* 直道时竖置融合权重打六折 */
 
-/* 转过了要能回来: 急弯里误差符号与锁方向相反且够大时立即释放锁方向 */
-#define SHARP_OVERSHOOT_TH 25.0f
-
 /* 差速总上限。35% 基准下 1000 ≈ 29% 差速, 内轮不会接近停转(不甩);
  * 分档限幅见 DELTA_CAP_45/90/110, 那几个才是真正管"转弯幅度"的。 */
 #define DELTA_MAX        1000
@@ -62,26 +59,14 @@ volatile int16_t Speed_Delta = 0;
 #define DELTA_SLEW_UP    180
 #define DELTA_SLEW_DN    240
 
-/* 弯道降速的两个拐点(误差绝对值): 调小 = 弯道判定更灵敏, 更早开始降速 */
-#define CURVE_TH1        12.0f
-#define CURVE_TH2        36.0f
+/* 弯道降速: 只保留"直角/大弯瞬间降速"这一条。
+ * 45° 及以下不减速(直线/小弯保持流畅), 90°/110° 一确认立刻降到 55%,
+ * 降速后按剩余误差一点点转, 转够立即恢复全速。 */
+#define CURVE_SPEED_RATIO 0.55f
 
-/* ---- 前瞻滞后(默认关闭): 一阶低通代替环形队列 ----
- * 旧实现用 96 深度 float 环形队列(768B RAM), 每个控制周期还要做两次
- * 非 2 次幂取模(软件除法); 默认 Lag_Ratio=0 时这些开销完全白费。
- * 开源方案普遍用滑动平均/一阶低通抗噪: 只占 8B RAM、每周期两次乘加,
- * 不会把"延迟"变成固定的死时间, 也不会拖慢 5ms 控制环。
- *   lag=0 -> 直通(默认, 无延迟); lag=1 -> 强平滑。 */
-#define LOOKAHEAD_MM     120.0f  /* 电感前瞻距离, 仅用于菜单显示等效滞后周期 */
-#define LAG_DISP_MAX     90       /* 菜单 K 的显示上限(90 × 5ms = 450ms) */
-volatile float Lag_Ratio = 0.0f;
-volatile uint8_t Lag_Cycles = 0;   /* 等效滞后周期(菜单第 7 页显示) */
-
-/* ---- 速度调度总开关 ----
- * 0 = 全程恒定 35% PWM(当前要求): 弯道、丢线、出弯都不再加速/减速。
- * 1 = 恢复按误差/元素的自动降速(旧行为)。
- * 关掉调度后, 下面 CURVE_TH / SHARP_SPEED_RATIO / LOST_SPEED_RATIO 都不生效。 */
-#define SPEED_SCHEDULE_EN 0
+/* 【前瞻滞后 / 延迟反应 / 速度调度开关 已全部删除】
+ * 原 CURVE_TH1/2、Lag_Ratio、Lag_Cycles、LOOKAHEAD_MM、LAG_DISP_MAX、
+ * SPEED_SCHEDULE_EN 都不再存在: 误差直接进 PD, 不做任何人为延迟或平滑保持。 */
 
 /* 丢线保护 */
 #define LOST_CONFIRM     8       /* 连续 8 周期(40ms)低场强才判丢线 */
@@ -91,46 +76,16 @@ uint8_t  Lost_State = 0;
 uint16_t Lost_Timer = 0;
 int8_t   Last_Dir = 1;
 
-/* 急弯(直角弯/锯齿)处理 —— 没有陀螺仪的弯道策略:
- *   进入: 横置误差饱和(车明显偏离线中心) 或 竖置误差很大(前方是弯)
- *         -> 锁定转向方向并立即持续转向;
- *   退出: 左右横置电感原始值都不低于 400 且基本相等, 连续确认 3 周期;
- *   保险: 锁太久(2s)强制交还 PD, 防止误判卡死。
- */
-#define SHARP_TH         56.0f   /* 横置误差饱和阈值(56: 60° 弯不再直接打死, 直角仍触发) */
-#define SHARP_V_TH       62.0f   /* 竖置误差达到此值也进入(弯道信号) */
-#define SHARP_CONFIRM    3       /* 连续 3 周期满足才进入 */
-#define SHARP_EXIT_ADC_MIN 400   /* 两个循迹横置电感都必须有足够信号 */
-#define SHARP_EXIT_ADC_DIFF 80   /* 原始 ADC 读数允许的相等误差(放宽 = 更快判定回中) */
-#define SHARP_EXIT_CONFIRM 2     /* 连续 2 周期(10ms)满足就退出, 响应更快 */
-#define SHARP_MIN_TURN_TICK 6    /* 至少转 30ms, 避免入口瞬时对称误出弯 */
-#define SHARP_EXIT_ERR     25.0f /* 误差已收小 = 基本摆正 -> 立刻收油(防转过头) */
-#define SHARP_EXIT_ERR_TICK 20   /* 至少转 100ms 才允许用误差判据退出 */
-#define SHARP_MAX_TICK   400     /* 最长锁 400 周期(2s), 防误判卡死 */
-#define SHARP_SPEED_RATIO 0.45f  /* 急弯降速比例; SPEED_SCHEDULE_EN=0 时不生效 */
-
-/* ---- 急弯/直角: 纯传感器闭环, 不设固定角度、不定固定时长 ----
- * 进入后只锁"方向"(防止邻线引起反向抽抽), 转向幅度由当前误差实时决定:
- *   误差大 -> 转得多; 误差变小 -> 自动收油; 横置电感重新对称 -> 当场释放。
- * 没有"先直行固定距离"的前瞻段, 也没有"必须转满 xx 度"的目标。 */
-#define SHARP_TURN_MIN   450.0f  /* 转向幅度下限, 保证直角能起得来 */
-
-uint8_t  Sharp_State = 0;
-uint16_t Sharp_Timer = 0;
-uint16_t Sharp_ExitCnt = 0;
-int8_t   Sharp_Dir = 1;
-/* 进入确认期间的方向投票(累加): 单拍符号会被交叉线/瞬时对称带偏,
- * 连续 SHARP_CONFIRM 个周期累加后取符号 = 多数投票, 减少"转反"。 */
-static float s_dir_vote_v = 0.0f;
-static float s_dir_vote_h = 0.0f;
+/* 【急弯"锁方向保持"状态机已全部删除】
+ * 原 SHARP_TH / Sharp_State / Sharp_Dir / Sharp_Timer / SHARP_EXIT_* /
+ * 方向投票 / 保持计时等都不再存在。
+ * 直角弯改由 Curve_Update() 的"按角度分级 + 转弯过程实时判断"处理:
+ * 不锁方向、不做进入/退出确认、不保持, 转够或转错都当场收敛。 */
 
 volatile float D_Filt   = 0.0f;   /* 横置 D 项(低通后), 菜单页显示 */
 static  float D_V_Filt_ = 0.0f;   /* 竖置 D 项(低通后) */
 static  float Dly_Prev_H = 0.0f;  /* 延迟队列输出的上周期横置样本(求 D 用) */
 static  float Dly_Prev_V = 0.0f;  /* 延迟队列输出的上周期竖置样本(求 D 用) */
-
-static float s_lag_h = 0.0f;   /* 横置误差的一阶低通状态 */
-static float s_lag_v = 0.0f;   /* 竖置误差的一阶低通状态 */
 
 /* ============================================================
  *  无陀螺仪航向估计 —— 用两个编码器的速度差当"电子陀螺"
@@ -180,7 +135,7 @@ void PID_Yaw_Update(void)
     Yaw_Deg += Yaw_Rate_Dps * 0.005f;
 
     /* 非元素期间缓慢回零: 没有绝对参考, 只保留单次转弯内的相对角度 */
-    if ((Sharp_State == 0) && (Cross_Stage == 0) && (HexDia_Flag == 0))
+    if ((Curve_Turn_Now == 0) && (Cross_Stage == 0) && (HexDia_Flag == 0))
     {
         Yaw_Deg *= 0.998f;
     }
@@ -206,44 +161,54 @@ void PID_Yaw_Update(void)
 #define CURVE_45_MIN     22.0f   /* >22 = 45° 级弯(轻弯) */
 #define CURVE_90_MIN     55.0f   /* >55 = 90° 级弯 */
 #define CURVE_110_MIN    80.0f   /* >80 = 110° 级弯(最急) */
-#define CURVE_CONFIRM    3       /* 同方向连续 3 周期(15ms)才确认真弯 */
-#define CURVE_HOLD       10      /* 确认后粘性保持 10 周期(50ms), 防状态抖 */
-#define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限: 杜绝大范围乱转 */
+#define CURVE_CONFIRM    2       /* 同方向连续 2 周期(10ms)就确认, 更快进弯 */
+#define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限 */
 #define DELTA_CAP_45     600     /* 45° 允许的差速上限 */
 #define DELTA_CAP_90     850     /* 90° 允许的差速上限 */
 #define DELTA_CAP_110    1000    /* 110° 允许的差速上限 */
 
+/* 转弯过程: 起步柔和 -> 逐渐加力 -> 转够/转错立刻收(无任何保持) */
 #define TURN_DONE_ERR    12.0f   /* 误差回落到这个以下 = 基本转够了 */
 #define TURN_DONE_CNT    3       /* 连续 3 周期(15ms)确认才收油 */
 #define TURN_BIAS_K      4.0f    /* 转弯中按剩余误差补一点方向 */
 #define TURN_BIAS_MAX    300
+#define TURN_RAMP_TICK   10      /* 前 50ms 从 60% 力渐进到 100%: 一点一点转 */
+#define TURN_WRONG_ERR   20.0f   /* 转弯中误差反向且超过此值 -> 可能转错 */
+#define TURN_WRONG_CNT   3       /* 连续 3 拍 -> 判定转错, 立刻结束 */
+#define TURN_BLOCK_TICK  24      /* 转错后 120ms 内不再进弯, 让 PD 反向拉回 */
 #define TURN_MAX_TICK    400     /* 2s 保险, 防误判卡死 */
 
 /* 供菜单"弯道判定页"显示, 拍视频看数据用 */
 volatile uint8_t Curve_Grade_Now = 0;   /* 0=直道 1=45° 2=90° 3=110° */
 volatile uint8_t Curve_Turn_Now  = 0;   /* 1=转弯进行中(还没判定转够) */
 volatile uint8_t Curve_Conf_Now  = 0;   /* 当前同方向确认计数 */
+volatile uint8_t Curve_Wrong_Now = 0;   /* 1=刚判定转错(封锁期) */
 
 static uint8_t  s_curve_cnt   = 0;
-static uint8_t  s_curve_hold  = 0;
 static uint8_t  s_curve_grade = 0;
 static int8_t   s_curve_sign  = 0;
 static uint8_t  s_turn_active = 0;
 static uint8_t  s_turn_done   = 0;
+static uint8_t  s_turn_wrong  = 0;
+static uint8_t  s_turn_block  = 0;
 static int8_t   s_turn_dir    = 0;
 static uint16_t s_turn_tick   = 0;
 
 void PID_Curve_Reset(void)
 {
-    s_curve_cnt = s_curve_hold = s_curve_grade = 0;
-    s_curve_sign = 0;
-    s_turn_active = s_turn_done = 0;
-    s_turn_dir = 0;
-    s_turn_tick = 0;
-    Curve_Grade_Now = Curve_Turn_Now = Curve_Conf_Now = 0;
+    s_curve_cnt   = 0;
+    s_curve_grade = 0;
+    s_curve_sign  = 0;
+    s_turn_active = 0;
+    s_turn_done   = 0;
+    s_turn_wrong  = 0;
+    s_turn_block  = 0;
+    s_turn_dir    = 0;
+    s_turn_tick   = 0;
+    Curve_Grade_Now = Curve_Turn_Now = Curve_Conf_Now = Curve_Wrong_Now = 0;
 }
 
-/* 每 5ms 在 PID_Calculate 里调用一次 */
+/* 每 5ms 调用一次。没有"保持/延迟": 每拍都按当前误差重判。 */
 static void Curve_Update(float eh)
 {
     float   a  = fabsf(eh);
@@ -263,31 +228,28 @@ static void Curve_Update(float eh)
         else
         {
             s_curve_sign = sg;       /* 方向一变就重新数, 邻线抖动进不了确认 */
-            s_curve_cnt = 1;
-        }
-
-        if (s_curve_cnt >= CURVE_CONFIRM)
-        {
-            s_curve_grade = g;
-            s_curve_hold  = CURVE_HOLD;
-            if ((g >= 2) && !s_turn_active)
-            {
-                s_turn_active = 1;
-                s_turn_tick   = 0;
-                s_turn_done   = 0;
-                s_turn_dir    = sg;
-            }
+            s_curve_cnt  = 1;
         }
     }
     else
     {
         s_curve_cnt  = 0;
         s_curve_sign = 0;
-        if (s_curve_hold > 0) s_curve_hold--;
-        if (s_curve_hold == 0) s_curve_grade = 0;
     }
 
-    /* ---- 转的过程中判断"够了没" ---- */
+    /* 分级直接跟当前误差走, 不做粘性保持 */
+    s_curve_grade = (s_curve_cnt >= CURVE_CONFIRM) ? g : 0;
+
+    /* 直角/大弯: 确认后立刻进入"转弯中"(瞬间降速在 Speed_Schedule 里做) */
+    if ((s_curve_grade >= 2) && !s_turn_active && (s_turn_block == 0))
+    {
+        s_turn_active = 1;
+        s_turn_tick   = 0;
+        s_turn_done   = 0;
+        s_turn_wrong  = 0;
+        s_turn_dir    = (sg != 0) ? sg : s_curve_sign;
+    }
+
     if (s_turn_active)
     {
         if (s_turn_tick < 60000) s_turn_tick++;
@@ -301,19 +263,41 @@ static void Curve_Update(float eh)
             s_turn_done = 0;
         }
 
-        if ((s_turn_done >= TURN_DONE_CNT) ||
-            (s_turn_tick >= TURN_MAX_TICK) ||
-            ((sg != 0) && (sg != s_turn_dir) && (a > 20.0f)))
+        /* ---- 转错保护: 误差持续反向且够大 ---- */
+        if ((sg != 0) && (sg != s_turn_dir) && (a > TURN_WRONG_ERR))
+        {
+            if (s_turn_wrong < 250) s_turn_wrong++;
+        }
+        else
+        {
+            s_turn_wrong = 0;
+        }
+
+        if (s_turn_wrong >= TURN_WRONG_CNT)
+        {
+            /* 转错: 立刻结束并封锁一小段, PD 反向把车拉回线上 */
+            s_turn_active = 0;
+            s_turn_done   = 0;
+            s_turn_wrong  = 0;
+            s_turn_tick   = 0;
+            s_turn_block  = TURN_BLOCK_TICK;
+        }
+        else if ((s_turn_done >= TURN_DONE_CNT) || (s_turn_tick >= TURN_MAX_TICK))
         {
             s_turn_active = 0;
             s_turn_done   = 0;
             s_turn_tick   = 0;
         }
     }
+    else if (s_turn_block > 0)
+    {
+        s_turn_block--;
+    }
 
     Curve_Grade_Now = s_curve_grade;
     Curve_Turn_Now  = s_turn_active;
     Curve_Conf_Now  = s_curve_cnt;
+    Curve_Wrong_Now = (s_turn_block > 0) ? 1 : 0;
 }
 
 /* 清 D 项: 十字/急弯结束后调用。
@@ -360,35 +344,11 @@ void PID_Calculate(void)
     float d_raw_h, d_raw_v;
     float kp_eff, kd_eff, speed_ratio;
     float dh, dv, wv;
-    float eh_use, ev_use, lag, a, kf;
+    float eh_use, ev_use;
 
-    /* 一阶低通近似前瞻滞后: 0=直通(默认), 1=强平滑 */
-    lag = Lag_Ratio;
-    if (lag < 0.0f) lag = 0.0f;
-    if (lag > 1.0f) lag = 1.0f;
-    a = 1.0f - 0.85f * lag;
-
-    s_lag_h += (Error_H - s_lag_h) * a;
-    s_lag_v += (Error_V - s_lag_v) * a;
-    eh_use = s_lag_h;
-    ev_use = s_lag_v;
-
-    /* 菜单 Lag 页的 K: 按前瞻距离折算的"等效滞后周期", 只用来显示,
-     * 上限 90 周期(450ms)沿用原队列上限, 避免低速时显示一个荒谬的大数 */
-    if (lag == 0.0f)
-    {
-        Lag_Cycles = 0;
-    }
-    else if (Speed_Basic <= 0)
-    {
-        Lag_Cycles = LAG_DISP_MAX;
-    }
-    else
-    {
-        kf = lag * LOOKAHEAD_MM / ((float)Speed_Basic * 0.005f);
-        if (kf > (float)LAG_DISP_MAX) kf = (float)LAG_DISP_MAX;
-        Lag_Cycles = (uint8_t)(kf + 0.5f);
-    }
+    /* 误差直接进 PD: 不延迟、不平滑、不保持 */
+    eh_use = Error_H;
+    ev_use = Error_V;
 
     /* ---- 横置(直道) PD ---- */
     d_raw_h = eh_use - Dly_Prev_H;
@@ -443,7 +403,14 @@ void PID_Calculate(void)
     {
         int16_t cap;
 
-        if (s_turn_active)                       cap = DELTA_CAP_110;
+        if (s_turn_active)
+        {
+            /* 一点一点转: 前 50ms 从 60% 力渐进到 100%, 之后按剩余误差补 */
+            float ramp = 0.60f + 0.40f *
+                         (float)((s_turn_tick < TURN_RAMP_TICK) ? s_turn_tick : TURN_RAMP_TICK) /
+                         (float)TURN_RAMP_TICK;
+            cap = (int16_t)((float)DELTA_CAP_110 * ramp);
+        }
         else if (s_curve_grade >= 3)              cap = DELTA_CAP_110;
         else if (s_curve_grade == 2)              cap = DELTA_CAP_90;
         else if (s_curve_grade == 1)              cap = DELTA_CAP_45;
@@ -480,118 +447,6 @@ void PID_LostLine_Check(void)
     }
 }
 
-/* ------------------------------------------------------------
- *  急弯检测: 误差长时间饱和 = 车头指向赛道边缘/直角弯/锯齿
- *  进入后锁定转向方向, 避免 PD 在两路传感器之间来回抽动
- * ------------------------------------------------------------ */
-void PID_Sharp_Check(void)
-{
-    float ah = fabsf(Error_H);
-    float av = fabsf(Error_V);
-
-    /* 菜单里可以关掉急弯保持(普通赛道不需要); 六角环内有自己的策略 */
-    if (!Menu_ZigEn || (HexDia_Flag != 0))
-    {
-        Sharp_State = 0;
-        Sharp_Timer = 0;
-        Sharp_ExitCnt = 0;
-        return;
-    }
-
-    /* 十字/交叉路口必须先直行通过, 急弯状态不能在路口锁住转向。 */
-    if (Track_Straight || (Cross_Stage != 0))
-    {
-        Sharp_State = 0;
-        Sharp_Timer = 0;
-        Sharp_ExitCnt = 0;
-        return;
-    }
-
-    if (!Sharp_State)
-    {
-        /* 进入: 横置误差饱和 或 竖置误差很大(前方弯道信号) */
-        if ((ah > SHARP_TH) || (av > SHARP_V_TH))
-        {
-            if (Sharp_Timer < 60000) Sharp_Timer++;
-
-            /* 方向投票: 确认期内每个周期都累加。单拍符号会被
-             * 交叉导线/入口瞬时对称带偏, 累加后取符号 = 多数投票。 */
-            s_dir_vote_v += Error_V;
-            s_dir_vote_h += Error_H;
-
-            if (Sharp_Timer >= SHARP_CONFIRM)
-            {
-                Sharp_State = 1;
-                Sharp_Timer = 0;
-                Sharp_ExitCnt = 0;
-                /* 锁方向: 用【累加投票】的符号, 而不是最后一拍的单点符号。
-                 * 竖置指向性强(看的是前方弯往哪拐, 抗交叉线), 累加有量就信它;
-                 * 竖置累加几乎为 0(入口瞬时对称)再退回横置。 */
-                if (fabsf(s_dir_vote_v) > 5.0f)
-                    Sharp_Dir = (s_dir_vote_v > 0.0f) ? 1 : -1;
-                else if (fabsf(s_dir_vote_h) > 5.0f)
-                    Sharp_Dir = (s_dir_vote_h > 0.0f) ? 1 : -1;
-
-                s_dir_vote_v = 0.0f;
-                s_dir_vote_h = 0.0f;
-            }
-        }
-        else
-        {
-            Sharp_Timer = 0;
-            s_dir_vote_v = 0.0f;    /* 特征中断, 投票重来 */
-            s_dir_vote_h = 0.0f;
-        }
-    }
-    else
-    {
-        Sharp_Timer++;
-
-        /* 转过了: 误差符号与锁方向相反且幅度明显 -> 当场释放,
-         * 交还普通 PD, 车能实时反向修正回到线上(不再一路转下去)。 */
-        if ((Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
-            (fabsf(Error_H) > SHARP_OVERSHOOT_TH) &&
-            ((Error_H * (float)Sharp_Dir) < 0.0f))
-        {
-            Sharp_State = 0;
-            Sharp_Timer = 0;
-            Sharp_ExitCnt = 0;
-            PID_D_Reset();
-            return;
-        }
-
-        /* 出弯判据(实时): 两路横置电感重新都压到线且基本对称 -> 当场释放。
-         * 不再等固定时间/固定角度, 赛道怎么变就怎么跟。 */
-        if ((Sharp_Timer >= SHARP_MIN_TURN_TICK) &&
-            (((ADC_Value[3] >= SHARP_EXIT_ADC_MIN) &&
-              (ADC_Value[0] >= SHARP_EXIT_ADC_MIN) &&
-              (abs((int)ADC_Value[3] - (int)ADC_Value[0]) <= SHARP_EXIT_ADC_DIFF)) ||
-             ((Sharp_Timer >= SHARP_EXIT_ERR_TICK) && (ah < SHARP_EXIT_ERR))))
-        {
-            if (Sharp_ExitCnt < 60000) Sharp_ExitCnt++;
-            if (Sharp_ExitCnt >= SHARP_EXIT_CONFIRM)
-            {
-                Sharp_State = 0;
-                Sharp_Timer = 0;
-                Sharp_ExitCnt = 0;
-                PID_D_Reset();  /* 清 D 项: 出弯瞬间不许带尖峰 */
-            }
-        }
-        else
-        {
-            Sharp_ExitCnt = 0;
-        }
-
-        /* 安全退出: 锁太久说明判断错了, 交还给 PD */
-        if (Sharp_Timer >= SHARP_MAX_TICK)
-        {
-            Sharp_State = 0;
-            Sharp_Timer = 0;
-            Sharp_ExitCnt = 0;
-            PID_D_Reset();
-        }
-    }
-}
 
 /* ------------------------------------------------------------
  *  把 PD 输出、元素偏置、丢线/急弯策略合成为最终差速
@@ -655,23 +510,11 @@ int16_t PID_Apply(int16_t delta)
         return Delta_Slew(out);
     }
 
-    if ((HexDia_Flag == 0) && Lost_State && !Sharp_State)
+    if ((HexDia_Flag == 0) && Lost_State)
     {
         /* 丢线: 丢线时不能用传感器误差(噪声大), 沿最后方向低速找线
          * (在六角菱形环里不适用, 环内的丢线由环状态机自己处理) */
         out = (int16_t)(Last_Dir * LOST_SEARCH_DELTA);
-    }
-    else if ((HexDia_Flag == 0) && Sharp_State)
-    {
-        /* 实时闭环: 直接用当前 PD 输出【含方向】。转过头时误差反向,
-         * 输出立刻跟着反向把车拉回线上, 不再被锁死方向回不来。
-         * 只在 PD 输出过小时按锁方向给一个最小转向量, 防止弯里停滞。 */
-        float d = (float)delta;
-
-        if (fabsf(d) < SHARP_TURN_MIN) d = (float)Sharp_Dir * SHARP_TURN_MIN;
-        if (d >  (float)DELTA_MAX) d =  (float)DELTA_MAX;
-        if (d < -(float)DELTA_MAX) d = -(float)DELTA_MAX;
-        out = (int16_t)d;
     }
 
     /* 赛道元素(十字/圆环)附加的转向偏置 */
@@ -690,52 +533,33 @@ int16_t PID_Apply(int16_t delta)
 /* ------------------------------------------------------------
  *  速度调度
  *
- *  当前要求: 全程恒定 35% PWM —— 弯道不减速、出弯不加速。
- *  SPEED_SCHEDULE_EN = 0 时直接原样返回, 下面的分档逻辑全部旁路。
- *  想恢复"弯道自动降速"只改这一个开关, 不用动其它地方。
+ *  只做两件事: 直角/大弯瞬间降到 55%, 丢线降到 45%; 其余全程 30% 恒速。
+ *  直线与 45° 小弯不减速(保持流畅), 90°/110° 一确认立刻降速,
+ *  转够或判转错后立刻恢复 —— 没有任何"保持/延迟"。
  * ------------------------------------------------------------ */
 int16_t PID_Speed_Schedule(int16_t basic)
 {
-#if (SPEED_SCHEDULE_EN == 0)
-    (void)basic;
-    return basic;                 /* 恒速: 35% PWM 一路到底 */
-#else
-    float a = fabsf(Error);
     float ratio = 1.0f;
 
     if (HexDia_Flag != 0)
     {
-        ratio = 1.0f;        /* 环内速度由赛道元素模块单独给 */
+        ratio = 1.0f;                 /* 环内由环状态机自己给速度系数 */
     }
     else if (Lost_State)
     {
         ratio = LOST_SPEED_RATIO;
     }
-    else if (Sharp_State)
+    else if (Curve_Turn_Now || (Curve_Grade_Now >= 2))
     {
-        ratio = SHARP_SPEED_RATIO;    /* 弯道减速: 缓慢通过, 回中后自动恢复 */
+        ratio = CURVE_SPEED_RATIO;    /* 直角/大弯: 瞬间降速, 再一点点转 */
     }
-    else
+    else if (Curve_Grade_Now == 1)
     {
-        if (a <= CURVE_TH1)
-        {
-            ratio = 1.0f;
-        }
-        else if (a <= CURVE_TH2)
-        {
-            /* 12~36 之间线性降到 70% */
-            ratio = 1.0f - (a - CURVE_TH1) / (CURVE_TH2 - CURVE_TH1) * 0.30f;
-        }
-        else
-        {
-            /* 36 以上继续降到 50% */
-            ratio = 0.70f - (a - CURVE_TH2) / (100.0f - CURVE_TH2) * 0.20f;
-        }
+        ratio = 0.90f;                /* 45° 轻弯: 略收一点, 不影响流畅 */
     }
 
-    ratio *= Track_Speed_Ratio;   /* 赛道元素的速度系数 */
+    ratio *= Track_Speed_Ratio;       /* 赛道元素的速度系数 */
 
     if (ratio < 0.20f) ratio = 0.20f;
     return (int16_t)((float)basic * ratio);
-#endif
 }

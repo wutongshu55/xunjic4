@@ -10,9 +10,12 @@
  *   S1  差比和误差是否与"离导线距离"无关
  *   S2  十字路口在 10/20/40cm 下能否识别
  *   S2b 路口一律只直行(含起点线) + 过再多路口也不自动停车
+ *   S2c 交叉线甩到车后(竖置连续回落)应提前结束直行
  *   S3  直线/直角弯/普通右弯 不误判
  *   S4  六角菱形环在三个距离下的入口识别
  *   S4b 六角菱形环闭环(进环/环内丢线/左侧重现出环)
+ *   S4c 出环冷却(防连判) + HexDia_Reset
+ *   S4d 出环需要绕够角度(编码器航向门槛, 无陀螺仪)
  *   S5  丢线保护
  *   S6  急弯保持(锯齿线) + 横置电感回线判据
  *   S7  弯道降速调度
@@ -58,7 +61,6 @@ uint8_t  Menu_Running = 1;      /* 只有 0=停 / 1=跑(圈数与自动停车已
 uint8_t  Menu_CrossCount = 0;
 uint8_t  Menu_Page = 0;
 uint8_t  Menu_CalibMode = 0;
-uint8_t  Menu_ZigEn = 1;
 uint8_t  Menu_DistRaw = 0;
 const int16_t Speed_Level_Table[3] = {3000, 5000, 7500};
 volatile int16_t Speed_Basic = 5000;
@@ -118,11 +120,11 @@ static void Feed(int16_t nL, int16_t nML, int16_t nMR, int16_t nR, float k)
 /* 复位所有状态机 */
 static void Reset_State(void)
 {
-    HexDia_Flag = 0; HexDia_Timer = 0;
-    Cross_Stage = 0; Cross_Timer = 0;
+    HexDia_Reset();          /* 环状态机 + 出环冷却 + 航向基准 */
+    Cross_Reset();           /* 十字/路口状态机 + 提前出路口计数 */
     Track_Straight = 0; Track_Steer_Bias = 0; Track_Speed_Ratio = 1.0f;
     Lost_State = 0; Lost_Timer = 0;
-    Sharp_State = 0; Sharp_Timer = 0; Sharp_ExitCnt = 0;
+    PID_Curve_Reset();
     D_Filt = 0.0f; Error = 0.0f; Error_Last = 0.0f;
     Error_H = 0.0f; Error_V = 0.0f;
     Menu_CrossCount = 0;
@@ -256,10 +258,40 @@ static void S2b_Cross_Always_Straight(void)
     CHECK(Menu_Running == 1, "无论过多少路口都不许自动停车, 实际 Running=%d", Menu_Running);
 }
 
+/* ================= S2c 十字提前出路口 =================
+ * 交叉线甩到车后(竖置连续回落)就应交还 PD, 不必每次等满 hold(24 周期)。
+ * 参考通用做法: 路口出口 = 路口特征消失, 与入口判据互为镜像。 */
+static void S2c_Cross_Early_Release(void)
+{
+    int j, exit_at;
+
+    printf("\n[S2c] 交叉线甩到车后应提前结束直行\n");
+    Reset_State();
+    Prime_Base();
+    for (j = 0; j < 30; j++) { CROSS(1.0f); Track_Judge(); }
+    CHECK(Track_Straight == 1, "路口内应保持直行");
+
+    exit_at = -1;
+    for (j = 0; j < 60; j++)
+    {
+        STRAIGHT(1.0f); Track_Judge();
+        if (!Track_Straight) { exit_at = j; break; }
+    }
+    printf("  驶出路口后 %d 周期解除直行 (提前出路口应 < 24)\n", exit_at);
+    CHECK(exit_at >= 0, "驶出路口后应解除直行");
+    CHECK(exit_at < 24, "竖置连续回落应提前结束直行, 实际 %d 周期", exit_at);
+
+    /* 反向: 宽起点线/真实路口中竖置一直高, 不允许被提前放出去 */
+    Reset_State();
+    Prime_Base();
+    for (j = 0; j < 70; j++) { CROSS(1.0f); Track_Judge(); }
+    CHECK(Track_Straight == 1, "路口中竖置仍高时不得提前结束直行");
+}
+
 /* ================= S3 不该误判的情况 ================= */
 static void S3_No_False_Positive(void)
 {
-    int i;
+	int i;
     float k = 1.0f;
 
     printf("\n[S3] 直线 / 直角弯 / 普通右弯 不应被误判\n");
@@ -387,6 +419,82 @@ static void S4b_HexDia_ClosedLoop(void)
           HexDia_Flag, Error);
 }
 
+/* ================= S4c 出环冷却(防连判) + 发车复位 =================
+ * 出环过程中横置仍偏侧、竖置可能没落干净, 立即重判容易把"正在出环"
+ * 当成"又一次入环"。出环完成后 HEX_COOLDOWN(1s) 内不接受入口特征。 */
+static void S4c_HexDia_Cooldown_And_Reset(void)
+{
+    int i;
+    float k = 1.0f;
+
+    printf("\n[S4c] 出环冷却(防连判) + HexDia_Reset\n");
+    Reset_State();
+    Prime_Base();
+
+    /* 完整跑一次环: 进环 -> 环内(绕够时间门槛 HEX_IN_MIN) -> 对侧重现出环 -> 回中 */
+    for (i = 0; i < 15; i++) { HEX_ENTRY(k);  Track_Judge(); }
+    for (i = 0; i < 80; i++) { HEX_INSIDE(k); Track_Judge(); }
+    for (i = 0; i < 10; i++) { HEX_BACK(k);   Track_Judge(); }
+    for (i = 0; i < 80; i++) { STRAIGHT(k);   Track_Judge(); }
+    CHECK(HexDia_Flag == 0, "环应正常走完, 实际 %d", HexDia_Flag);
+
+    /* 冷却期内: 入口特征再强也不许立刻再次进环 */
+    for (i = 0; i < 30; i++) { HEX_ENTRY(k); Track_Judge(); }
+    CHECK(HexDia_Flag == 0, "出环冷却期内不应再次进环(防连判), 实际 %d", HexDia_Flag);
+    CHECK(HexDia_Cool  > 0, "冷却计数应仍在流逝, 实际 %u", HexDia_Cool);
+
+    /* 纯直道空转 1s 等冷却结束 */
+    for (i = 0; i < 220; i++) { STRAIGHT(k); Track_Judge(); }
+    for (i = 0; i < 15; i++) { HEX_ENTRY(k); Track_Judge(); }
+    CHECK(HexDia_Flag == 1, "冷却结束后应能再次识别环入口, 实际 %d", HexDia_Flag);
+
+    /* 发车复位: 状态机与冷却一起清掉(中途停车残留场景) */
+    HexDia_Reset();
+    CHECK(HexDia_Flag == 0 && HexDia_Timer == 0 && HexDia_Cool == 0,
+          "HexDia_Reset 应清空环状态机/计时/冷却");
+}
+
+/* ================= S4d 出环航向门槛(编码器代替陀螺仪) =================
+ * 环内摆动可能把对侧导线短暂带到强侧 -> 只看落差会提前出环。
+ * 入环时记下编码器航向, 出环要求航向沿环方向累计 >= HEX_YAW_EXIT_MIN。 */
+static void S4d_HexDia_Yaw_Gate(void)
+{
+    int i;
+    float k = 1.0f;
+
+    printf("\n[S4d] 出环需绕够角度(编码器航向, 无陀螺仪)\n");
+    Reset_State();
+    Prime_Base();
+    Yaw_Valid = 1;
+    Yaw_Deg   = 0.0f;
+
+    for (i = 0; i < 15; i++) { HEX_ENTRY(k); Track_Judge(); }
+    CHECK(HexDia_Flag == 1, "应先识别环入口, 实际 %d", HexDia_Flag);
+
+    /* 航向只累计到 60 度就出现"对侧导线": 不许提前出环 */
+    for (i = 0; i < 60; i++) { HEX_INSIDE(k); Yaw_Deg += 1.0f; Track_Judge(); }
+    Yaw_Deg = 60.0f;
+    for (i = 0; i < 10; i++) { HEX_BACK(k); Track_Judge(); }
+    printf("  航向 60 度 + 对侧导线: 状态=%d (应仍为 2, 未绕够)\n", HexDia_Flag);
+    CHECK(HexDia_Flag == 2, "航向未绕够时对侧导线不应触发出环, 实际 %d", HexDia_Flag);
+
+    /* 航向累计到 180 度后, 同样的对侧导线特征才允许出环 */
+    for (i = 0; i < 60; i++) { HEX_INSIDE(k); Yaw_Deg += 2.0f; Track_Judge(); }
+    Yaw_Deg = 180.0f;
+    for (i = 0; i < 10; i++) { HEX_BACK(k); Track_Judge(); }
+    printf("  航向 180 度 + 对侧导线: 状态=%d (应为 3 出环)\n", HexDia_Flag);
+    CHECK(HexDia_Flag == 3, "航向绕够后对侧导线应触发出环, 实际 %d", HexDia_Flag);
+
+    /* 编码器失效(Yaw_Valid=0): 退回时间门槛, 环流程仍能走完 */
+    Reset_State();
+    Prime_Base();
+    Yaw_Valid = 0;
+    for (i = 0; i < 15; i++) { HEX_ENTRY(k);  Track_Judge(); }
+    for (i = 0; i < 80; i++) { HEX_INSIDE(k); Track_Judge(); }
+    for (i = 0; i < 10; i++) { HEX_BACK(k);   Track_Judge(); }
+    CHECK(HexDia_Flag == 3, "无航向时应按时间门槛照常出环, 实际 %d", HexDia_Flag);
+}
+
 /* ================= S5 丢线保护 ================= */
 static void S5_Lost_Line(void)
 {
@@ -412,66 +520,10 @@ static void S5_Lost_Line(void)
         }
         {
             int16_t slow = PID_Speed_Schedule(Speed_Basic);
-            printf("  丢线时调度后基础速度=%d (原 %d, 应相等: 全程恒速)\n", slow, Speed_Basic);
-            CHECK(slow == Speed_Basic, "SPEED_SCHEDULE_EN=0 时应全程恒速, 实际 %d", slow);
+            printf("  丢线时调度后基础速度=%d (原 %d, 应降速)\n", slow, Speed_Basic);
+            CHECK(slow < Speed_Basic, "丢线应降速, 实际 %d / %d", slow, Speed_Basic);
         }
     }
-}
-
-/* ================= S6 急弯保持(锯齿线) ================= */
-static void S6_Sharp_Turn(void)
-{
-    int i;
-    float k = 1.0f;
-    int16_t d1 = 0, d2 = 0;
-
-    printf("\n[S6] 急弯(锯齿线/直角弯)保持\n");
-    Reset_State();
-    /* 导线跑到最左边 -> 误差饱和 */
-    for (i = 0; i < 10; i++) { Feed(100, 10, 0, 0, k); PID_Sharp_Check(); PID_Calculate(); }
-    printf("  饱和时 Error=%+.2f 急弯状态=%d 方向=%d\n", Error, Sharp_State, Sharp_Dir);
-    CHECK(Sharp_State == 1, "误差饱和应进入急弯保持");
-
-    d1 = PID_Apply(Speed_Delta);
-    /* 锯齿线: 误差反向但还没回中, 保持方向不许抽动 */
-    Feed(0, 0, 10, 100, k);
-    PID_Sharp_Check();
-    PID_Calculate();
-    d2 = PID_Apply(Speed_Delta);
-    printf("  反向瞬间 原始差速=%d 保持后差速=%d (饱和时差速=%d, 符号应保持一致)\n",
-           Speed_Delta, d2, d1);
-    CHECK((d1 > 0) == (d2 > 0), "急弯保持期间转向方向不应反转: %d vs %d", d1, d2);
-
-    Lost_State = 1;
-    Last_Dir = (int8_t)-Sharp_Dir;
-    d2 = PID_Apply(0);
-    CHECK((d2 > 0) == (Sharp_Dir > 0), "急弯锁定期间丢线搜索不能抢走锁定方向");
-    Lost_State = 0;
-
-    /* 两个电感虽然相等, 但均低于 400 时仍未可靠重新压线, 不能出弯。 */
-    for (i = 0; i < 10; i++) { FeedRaw(300, 200, 200, 300); PID_Sharp_Check(); }
-    CHECK(Sharp_State == 1, "横置电感低于 400 时不能退出急弯");
-
-    FeedRaw(500, 200, 200, 600); PID_Sharp_Check();
-    CHECK(Sharp_State == 1, "L/R 差值超过容差时不能退出急弯");
-
-    /* 达到阈值后连续确认 2 周期即退出, 不再直行等待 */
-    FeedRaw(500, 200, 200, 520); PID_Sharp_Check();
-    CHECK(Sharp_State == 1, "出弯判据第 1 周期仍应保持转向");
-    FeedRaw(500, 200, 200, 520); PID_Sharp_Check();
-    CHECK(Sharp_State == 0, "两路横置电感均不低于 400 且接近时应立即退出");
-
-    /* 十字状态下禁止进入或保持急弯状态, 路口优先直行。 */
-    Reset_State();
-    Cross_Stage = 1;
-    Track_Straight = 1;
-    for (i = 0; i < 10; i++) { Feed(100, 10, 0, 0, k); PID_Sharp_Check(); }
-    CHECK(Sharp_State == 0, "十字直行状态不得进入急弯锁定");
-
-    Cross_Stage = 0;
-    Track_Straight = 0;
-    for (i = 0; i < 3; i++) { Feed(100, 10, 0, 0, k); PID_Sharp_Check(); }
-    CHECK(Sharp_State == 1, "驶出十字后应能识别紧随其后的直角弯");
 }
 
 /* ================= S7 弯道降速调度 ================= */
@@ -480,20 +532,20 @@ static void S7_Speed_Schedule(void)
     int i;
     float k = 1.0f;
 
-    printf("\n[S7] 恒速(弯道不再降速)\n");
-    Speed_Basic = 700;      /* mm/s */
+    printf("\n[S7] 直线/小弯不减速, 直角/大弯瞬间降速\n");
+    Speed_Basic = 300;
     Reset_State();
-    for (i = 0; i < 20; i++) { STRAIGHT(k); }
-    printf("  直线   Error=%+6.2f -> 速度 %d\n", Error, PID_Speed_Schedule(Speed_Basic));
-    {
-        int16_t straight = PID_Speed_Schedule(Speed_Basic);
-        for (i = 0; i < 20; i++) { Feed(80, 5, 0, 8, k); }  /* 偏得多(弯道) */
-        printf("  大偏差 Error=%+6.2f -> 速度 %d\n", Error, PID_Speed_Schedule(Speed_Basic));
-        {
-            int16_t curve = PID_Speed_Schedule(Speed_Basic);
-            CHECK(curve == straight, "全程恒速: 弯道不该降速 %d vs %d", curve, straight);
-        }
-    }
+    for (i = 0; i < 20; i++) { STRAIGHT(k); PID_Calculate(); }
+    CHECK(PID_Speed_Schedule(Speed_Basic) == 300, "直道应保持全速(30%% PWM)");
+
+    for (i = 0; i < 10; i++) { CURVE_R(k); PID_Calculate(); }
+    printf("  直角档 G=%d 速度=%d (应约 %d)\n",
+           Curve_Grade_Now, PID_Speed_Schedule(Speed_Basic), (int)(300 * 0.55f));
+    CHECK(Curve_Turn_Now == 1, "90 度应进入转弯中");
+    CHECK(PID_Speed_Schedule(Speed_Basic) < 200, "直角弯应瞬间降速");
+
+    for (i = 0; i < 10; i++) { STRAIGHT(k); PID_Calculate(); }
+    CHECK(PID_Speed_Schedule(Speed_Basic) == 300, "转够后应立刻恢复全速");
 }
 
 /* ================= S8 峰值保持与饱和检测 ================= */
@@ -546,7 +598,6 @@ static void Cycle(int n, int16_t nL, int16_t nML, int16_t nMR, int16_t nR)
     for (i = 0; i < n; i++)
     {
         Feed(nL, nML, nMR, nR, 1.0f);
-        PID_Sharp_Check();
         PID_Calculate();
         Track_Judge();
     }
@@ -624,23 +675,6 @@ static void S10_Delta_Shape_And_Yaw(void)
 
     printf("\n[S10] 差速斜率/限幅 + 十字航向锁定 + 急弯持续锁方向\n");
 
-    /* Lag=0 在低速也必须立即使用当前误差; 非零 Lag 的低速保护仍受上限约束。 */
-    Reset_State();
-    Speed_Basic = 0;
-    Lag_Ratio = 0.0f;
-    Error_H = 20.0f;
-    PID_Calculate();
-    CHECK(Lag_Cycles == 0, "Lag=0 时低速分支也不得引入延迟, 实际 %u 周期", Lag_Cycles);
-    Lag_Ratio = 0.30f;
-    PID_Calculate();
-    CHECK(Lag_Cycles == 90, "非零 Lag 的低速延迟仍应受 90 周期上限约束, 实际 %u", Lag_Cycles);
-    Speed_Basic = 51;
-    Lag_Ratio = 1.0f;
-    PID_Calculate();
-    CHECK(Lag_Cycles == 90, "低速高比例 Lag 应先饱和再转整数, 实际 %u", Lag_Cycles);
-    Lag_Ratio = 0.30f;
-    Speed_Basic = 5000;
-
     /* 1) 斜率: 一拍不许从 0 跳到满舵 */
     Reset_State();
     d = PID_Apply(3000);
@@ -674,40 +708,6 @@ static void S10_Delta_Shape_And_Yaw(void)
     CHECK(d < 0, "偏航时应反向修正, 实际 %d", d);
     Track_Straight = 0;
 
-    /* 4) 直角弯在满足电感出弯条件前持续锁方向, 不因估算角度提前停转。 */
-    Reset_State();
-    Yaw_Valid = 1;
-    Sharp_State = 1;
-    Sharp_Dir = 1;
-    Yaw_Deg = 0.0f;
-    for (i = 0; i < 6; i++) d = PID_Apply(0);
-    printf("  直角弯 0度: 差速=%d (应 >=380 保底)\n", d);
-    CHECK(d >= 380, "刚进弯应有保底转向量, 实际 %d", d);
-
-    Yaw_Deg = 45.0f;
-    for (i = 0; i < 3; i++) d = PID_Apply(0);
-    printf("  直角弯 45度: 差速=%d\n", d);
-    CHECK(d < 900, "半程不应顶到限幅");
-
-    Yaw_Deg = 90.0f;
-    for (i = 0; i < 20; i++) d = PID_Apply(0);
-    printf("  直角弯 90度: 差速=%d (仍应锁方向)\n", d);
-    CHECK(d >= 450, "未满足电感出弯条件前应继续转向, 实际 %d", d);
-
-    Yaw_Deg = 120.0f;
-    for (i = 0; i < 20; i++) d = PID_Apply(0);
-    printf("  转过 120度: 差速=%d (不允许反向)\n", d);
-    CHECK(d >= 450, "角度超过辅助目标后仍需锁方向, 实际 %d", d);
-
-    Sharp_Timer = 10;
-    FeedRaw(500, 200, 200, 520);
-    PID_Sharp_Check();
-    CHECK(Sharp_State == 1, "达到电感出弯条件第 1 周期仍保持锁定");
-    FeedRaw(500, 200, 200, 520);
-    PID_Sharp_Check();
-    CHECK(Sharp_State == 0, "电感满足阈值并确认(2 周期)后立即出弯");
-
-    Sharp_State = 0;
     Yaw_Valid = 0;
     Yaw_Deg = 0.0f;
 }
@@ -750,11 +750,13 @@ int main(void)
     S1_Error_Distance_Independent();
     S2_Cross_At_Distances();
     S2b_Cross_Always_Straight();
+    S2c_Cross_Early_Release();
     S3_No_False_Positive();
     S4_HexDia_At_Distances();
     S4b_HexDia_ClosedLoop();
+    S4c_HexDia_Cooldown_And_Reset();
+    S4d_HexDia_Yaw_Gate();
     S5_Lost_Line();
-    S6_Sharp_Turn();
     S7_Speed_Schedule();
     S8_Peak_And_Saturation();
     S9_Track_State();

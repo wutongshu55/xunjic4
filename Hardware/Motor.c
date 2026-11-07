@@ -33,14 +33,8 @@
  * 0.45 = 折中: 弯道降到 45% 时, 差速收成原来的 0.75。 */
 #define DELTA_SPEED_KEEP  0.45f
 
-/* 急弯/直角: 内轮占空比随【当前误差】实时变化, 不按固定时间/角度。
- *   误差 >= SHARP_INNER_REF -> 内轮降到 SHARP_INNER_DUTY(接近停, 半径最小)
- *   误差收小 -> 内轮自动补速, 车头平滑摆正
- * SHARP_INNER_STEP 是斜坡, 防止瞬间堵转。 */
-#define SHARP_INNER_DUTY  150
-#define SHARP_INNER_STEP  250.0f
-#define SHARP_INNER_REF   56.0f    /* 误差达到此值即"满舵"(提高后 60° 弯不会一上来就打死) */
-#define SHARP_INNER_K     0.93f    /* 满舵时内轮只保留 7% 基准 */
+/* 【急弯内轮压停参数已删除】直角弯不再把内轮压到接近停转,
+ * 改为"瞬间降速 + 按剩余误差渐进给差速", 见 PID.c 的 Curve_Update()。 */
 
 /* ---- 直道等速补偿(编码器) ----
  * 直行时两轮目标占空比完全相同, 但电机特性/阻力/轮胎直径不完全一致,
@@ -264,7 +258,7 @@ void CarMotor_Control(void)
          * 【判直道必须用横/竖各自误差】合成 Error 可能被横竖抵消成 0,
          * 那时车其实还在弯里, 用 Error 判断会把补偿积分带偏并固化成恒定差速 -> 转圈。 */
         if ((fabsf(Error_H) < EQ_STRAIGHT_TH) && (fabsf(Error_V) < EQ_STRAIGHT_TH) &&
-            !Sharp_State && !Track_Straight && (HexDia_Flag == 0) && !Lost_State)
+            !Curve_Turn_Now && !Track_Straight && (HexDia_Flag == 0) && !Lost_State)
         {
             float vr = (float)Speed_R_mms;
             float vl = (float)Speed_L_mms;
@@ -299,40 +293,10 @@ void CarMotor_Control(void)
         dl = base + d;
         dr = base - d;
 
-        /* ---- 急弯/直角: 内轮按当前误差实时缩放 ----
-         * 误差大(还在弯里) -> 内轮接近停转, 绕内轮转, 半径最小;
-         * 误差收小(快回中) -> 内轮自动补速, 车头平滑摆正。
-         * 不按固定时间、不按固定角度, 全靠电感反馈。 */
-        if (Sharp_State && (HexDia_Flag == 0) && !Track_Straight)
-        {
-            static float s_inner = 0.0f;
-            /* 用【合成误差】, 与运行页 E 一致: E=0 就不该再压内轮。
-             * 旧实现用 max(|E_H|,|E_V|), 横竖抵消成 E=0 时仍会满舵 -> 原地转圈。 */
-            float e = fabsf(Error);
-            float k = e / SHARP_INNER_REF;
-            float want;
-
-            if (k > 1.0f) k = 1.0f;
-            if (s_inner <= 0.0f) s_inner = base;      /* 首次进入从基准起步 */
-
-            want = base * (1.0f - SHARP_INNER_K * k);
-            if (want < (float)SHARP_INNER_DUTY) want = (float)SHARP_INNER_DUTY;
-
-            /* 斜坡: 每 5ms 最多变化 STEP, 防止瞬间堵转/打滑 */
-            if (want < s_inner)
-            {
-                s_inner -= SHARP_INNER_STEP;
-                if (s_inner < want) s_inner = want;
-            }
-            else
-            {
-                s_inner += SHARP_INNER_STEP;
-                if (s_inner > want) s_inner = want;
-            }
-
-            if (Sharp_Dir > 0) { dl = base; dr = s_inner; }  /* 左轮走、右轮停 */
-            else               { dl = s_inner; dr = base; }  /* 右轮走、左轮停 */
-        }
+        /* 【急弯内轮压停块已删除】
+         * 直角弯改为: 确认后立刻降速(PID_Speed_Schedule), 再按剩余误差
+         * 渐进给差速(Curve_Update 的 ramp), 转够/转错立刻收。
+         * 不再把内轮压到接近停转 —— 那是转过头、出弯甩尾的来源。 */
 
         if (dl > (float)PWM_DUTY_MAX) dl = (float)PWM_DUTY_MAX;
         if (dr > (float)PWM_DUTY_MAX) dr = (float)PWM_DUTY_MAX;

@@ -5,6 +5,7 @@
 
 extern uint8_t  HexDia_Flag;     /* 六角菱形环状态机 */
 extern uint16_t HexDia_Timer;    /* 六角菱形环计时 */
+extern uint16_t HexDia_Cool;     /* 出环冷却剩余周期(0=可入环) */
 extern uint8_t  Cross_Stage;
 extern uint16_t Cross_Timer;
 
@@ -39,5 +40,7 @@ void Track_Judge(void);
 
 /* 发车时调用: 复位路口状态机(已无圈数逻辑) */
 void Cross_Reset(void);
+/* 发车/调试时调用: 复位六角环状态机 + 出环冷却 + 航向基准 */
+void HexDia_Reset(void);
 
 #endif

@@ -18,12 +18,24 @@
  *                  (竖置的峰值就是在十字处标定的, 所以这是它本职工作);
  *    · 六角菱形环 -> 看【横置】是否强右偏, 且【竖置】也抬头(环内回线)。
  *    横置与竖置的绝对值从不直接比较。
+ *
+ *  2026-11 按公开方案补充的三条(本车没有陀螺仪, 角度一律用编码器):
+ *    · 十字出口: "路口特征消失"就是出口 —— 交叉线甩到车后(竖置连续回落)
+ *      就提前交还 PD, 不必每次都等满 hold 延时;
+ *    · 环防连判: 出环后 HEX_COOLDOWN(1s) 内不接受入口特征 —— 出环过程中
+ *      横置还带着偏侧, 立即重判容易把"正在出环"当成"又一次入环";
+ *    · 环出环门槛: 对侧导线重现之外, 还要求编码器航向(Yaw_Deg, 左右轮速差
+ *      积分)沿环方向累计绕够 HEX_YAW_EXIT_MIN 度 —— 环内摆动把对侧导线
+ *      短暂带到强侧时不提前出环; 编码器失效(Yaw_Valid=0)自动退回时间门槛。
  * ============================================================ */
 
 uint8_t  HexDia_Flag = 0;       /* 六角菱形环状态机 */
 uint16_t HexDia_Timer = 0;      /* 六角菱形环计时 */
+uint16_t HexDia_Cool = 0;       /* 出环冷却剩余周期(防连判, 菜单判定页可见) */
 uint8_t  Cross_Stage = 0;       /* 十字路口检测阶段 */
 uint16_t Cross_Timer = 0;       /* 十字路口计时 */
+static uint16_t s_cross_rel = 0;    /* 十字提前出路口的回落计数(复位用) */
+static float    s_hex_yaw0 = 0.0f;  /* 入环时刻的编码器航向(出环门槛基准) */
 
 /* 元素对控制的输出 */
 uint8_t  Track_Straight = 0;    /* 1 = 强制直行(十字路口) */
@@ -54,6 +66,14 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
                                 * 特征会"一直成立", 没有上限车就永远直行不拐弯。
                                 * 300mm/s 下 1.2s 走 36cm, 任何起点线都够通过。 */
 
+/* 十字出口(提前结束直行): 通用做法是"路口特征消失 = 出口"。
+ * 交叉线甩到车后, 竖置会从峰值连续回落; 与其干等 hold 满 120ms,
+ * 不如确认回落就交还 PD —— 路口后紧接弯道时能早 ~90ms 打方向。 */
+#define CROSS_V_RELEASE   20   /* 竖置回落到该值以下视为交叉线已过
+                                 * (竖置巡航基线偏高时改用 基线*1.3) */
+#define CROSS_RELEASE_MIN 16   /* 本次直行至少已持续 16 周期(80ms)才允许提前结束 */
+#define CROSS_RELEASE_CNT 6    /* 竖置连续 6 周期(30ms)回落才提前结束 */
+
 /* 说明: 早期版本在这里按"特征持续多久"区分普通十字与起点线, 并计圈,
  * 跑满目标圈数就自动停车。现已按需求【全部删除】:
  *   · 十字路口、起点线、折返线 —— 一律只"保持直行通过";
@@ -72,10 +92,23 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 #define HEX_IN_MAX       220   /* 环内最长 220 周期(1.1s) */
 #define HEX_EXIT_MAX     60    /* 出环最长 60 周期(300ms) */
 #define HEX_BACK_DIFF    35    /* 出环: 导线从对侧重新出现的落差阈值(%) */
-#define HEX_BIAS_IN      (-900)  /* 进环转向偏置(负=右转, 乘 HEX_DIR 镜像) */
-#define HEX_BIAS_KEEP    (-300)  /* 环内保持偏置 */
-#define HEX_BIAS_SEARCH  (-700)  /* 环内丢线时的找线偏置(转更多) */
-#define HEX_BIAS_OUT     (-500)  /* 出环偏置 */
+#define HEX_BIAS_IN      (-1000) /* 进环转向偏置(负=右转, 乘 HEX_DIR 镜像), 加大转角 */
+#define HEX_BIAS_KEEP    (-500)  /* 环内保持偏置, 六边形每段都要转够 */
+#define HEX_BIAS_SEARCH  (-800)  /* 环内丢线时的找线偏置(转更多) */
+#define HEX_BIAS_OUT     (-650)  /* 出环偏置 */
+
+/* 出环冷却(防连判): 出环完成后一段时间内不接受入口特征。
+ * 出环过程中横置仍带着偏侧、竖置也可能没落干净, 立即重判容易把
+ * "正在出环"当成"又一次入环"。参考公开方案: 出环后缓冲 1 秒。 */
+#define HEX_COOLDOWN     200    /* 200 周期 = 1s */
+
+/* 出环还要"确实绕了大半圈": 环内摆动可能把对侧导线短暂带到强侧,
+ * 只看落差会提前出环。没有陀螺仪 —— 用编码器左右轮速差积分出的航向
+ * (Yaw_Deg)代替陀螺仪积分: 入环时记下航向, 出环特征要求航向沿环方向
+ * 累计超过 HEX_YAW_EXIT_MIN 度才接受。
+ * 编码器不可用(Yaw_Valid=0)时自动退回"环内至少 HEX_IN_MIN 周期"。 */
+#define HEX_YAW_EXIT_MIN 150.0f /* 出环需要的最小航向累计(度) */
+#define HEX_IN_MIN       40     /* 无航向时的出环最短环内周期(200ms) */
 /* 靠环侧 / 对侧的横置电感(随 HEX_DIR 自动镜像) */
 #define HEX_NEAR(ad_l, ad_r)  ((HEX_DIR) > 0 ? (ad_r) : (ad_l))
 #define HEX_FAR(ad_l, ad_r)   ((HEX_DIR) > 0 ? (ad_l) : (ad_r))
@@ -116,6 +149,10 @@ static uint8_t Cross_Pattern(void)
     /* 若竖置平时也有可观读数(基线偏高), 还要求相对自身基线明显抬升 */
     if (V_Base > (float)CROSS_V_BASE_MIN && v < V_Base * CROSS_V_RISE) return 0;
 
+    /* 横置两路都要有实质信号: 真十字是两根线同时激励。
+     * 直角弯只有单侧导线, 常出现一侧很强另一侧接近 0 -> 在这里被排除。 */
+    if ((ADC_Lf < 20.0f) || (ADC_Rf < 20.0f)) return 0;
+
     /* 横置必须有信息, 且在左右方向上基本对称(排除直角弯)。
      * 竖置特别强时放宽对称要求, 避免真实十字因轻微偏心被漏掉(没成绩)。 */
     if (hsum < 2.0f) return 0;
@@ -140,6 +177,7 @@ void Cross_Reset(void)
 {
     Cross_Stage = 0;
     Cross_Timer = 0;
+    s_cross_rel = 0;
 }
 
 void Cross_Judge(void)
@@ -150,6 +188,19 @@ void Cross_Judge(void)
 
     Track_Straight = 0;
 
+    /* 直角/大弯优先: 已确认 90°/110° 或正在转弯时, 绝不强制直行。
+     * 这是"右直角弯冲出去"的根治点 —— 直角弯入口的竖置也会抬头,
+     * 以前会被 Cross_Pattern 判成十字, 强制直行 120ms, 车就冲过去了。 */
+    if ((Curve_Grade_Now >= 2) || Curve_Turn_Now)
+    {
+        Cross_Stage = 0;
+        Cross_Timer = 0;
+        hold = 0;
+        gap  = 0;
+        pat  = 0;
+        return;
+    }
+
     /* 环内【绝不允许】十字抢控制:
      * 环内回线让竖置抬头、横置又可能接近对称, 正好满足十字特征。
      * 一旦 Track_Straight=1, PID_Apply 的十字分支会提前 return,
@@ -159,7 +210,7 @@ void Cross_Judge(void)
     {
         Cross_Stage = 0;
         Cross_Timer = 0;
-        hold = 0; gap = 0; pat = 0;
+        hold = 0; gap = 0; pat = 0; s_cross_rel = 0;
         return;
     }
 
@@ -195,6 +246,7 @@ void Cross_Judge(void)
                     Cross_Stage = 2;
                     Cross_Timer = 0;
                     gap = 0;
+                    s_cross_rel = 0;
                 }
             }
             else
@@ -208,6 +260,7 @@ void Cross_Judge(void)
                         Menu_CrossCount++;
                         hold = CROSS_HOLD;
                         Cross_Stage = 2;
+                        s_cross_rel = 0;
                     }
                     else
                     {
@@ -228,11 +281,38 @@ void Cross_Judge(void)
             {
                 Track_Straight = 1;
                 if (hold == 0) hold = CROSS_HOLD;   /* 还在路口, 续期 */
+
+                /* 提前出路口: 交叉线已甩到车后(竖置连续回落到巡航电平)。
+                 * 出口判据 = "路口特征消失", 与入口判据互为镜像;
+                 * 至少已直行 CROSS_RELEASE_MIN, 且回落要连续确认, 防止
+                 * 路口中间的瞬时凹谷把车提前放出去。 */
+                {
+                    float rel_th = (V_Base > (float)CROSS_V_BASE_MIN)
+                                 ? V_Base * 1.3f : (float)CROSS_V_RELEASE;
+
+                    if ((Cross_Timer >= CROSS_RELEASE_MIN) &&
+                        (ADC_V_StrengthF < rel_th))
+                    {
+                        if (s_cross_rel < 60000) s_cross_rel++;
+                        if (s_cross_rel >= CROSS_RELEASE_CNT)
+                        {
+                            Cross_Stage = 0;
+                            Cross_Timer = 0;
+                            s_cross_rel = 0;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        s_cross_rel = 0;
+                    }
+                }
             }
             else
             {
                 Cross_Stage = 0;
                 Cross_Timer = 0;
+                s_cross_rel = 0;
             }
             break;
 
@@ -301,14 +381,40 @@ static uint8_t HexDia_Lost(void)
     return (ADC_StrengthF < (float)ABS_MIN) ? 1 : 0;
 }
 
+/* 出环的航向门槛: 接受"对侧导线重现"前, 车必须真的绕了大半圈。
+ * 有编码器航向 -> 看航向沿环方向的累计量; 没有 -> 退回时间门槛。 */
+static uint8_t HexDia_Yaw_OK(void)
+{
+    if (Yaw_Valid)
+    {
+        float prog = (Yaw_Deg - s_hex_yaw0) * (float)HEX_DIR;
+        return (prog >= HEX_YAW_EXIT_MIN) ? 1 : 0;
+    }
+    return (HexDia_Timer >= HEX_IN_MIN) ? 1 : 0;
+}
+
+/* 发车/调试时调用: 清空环状态机、出环冷却与航向基准。
+ * 上一次跑车若中途停车, 残留的环状态会把入环偏置带进下一次发车。 */
+void HexDia_Reset(void)
+{
+    HexDia_Flag = 0;
+    HexDia_Timer = 0;
+    HexDia_Cool = 0;
+    s_hex_yaw0 = 0.0f;
+}
+
 void HexDia_Judge(void)
 {
     if (Menu_HexDiaEn == 0)
     {
         HexDia_Flag = 0;
         HexDia_Timer = 0;
+        HexDia_Cool = 0;
         return;
     }
+
+    /* 冷却每个周期都在流逝, 与是否处于十字无关 */
+    if (HexDia_Cool > 0) HexDia_Cool--;
 
     /* 十字路口不触发新环; 已进入的环状态仍必须继续计时并走完出环流程。 */
     if ((Cross_Stage != 0) && (HexDia_Flag == 0))
@@ -319,12 +425,19 @@ void HexDia_Judge(void)
     switch (HexDia_Flag)
     {
         case 0:
+            /* 冷却期内不接受入口特征(防连判) */
+            if (HexDia_Cool > 0)
+            {
+                HexDia_Timer = 0;
+                break;
+            }
             if (HexDia_Entry_Pattern())
             {
                 if (++HexDia_Timer >= HEX_CONFIRM)
                 {
                     HexDia_Flag = 1;
                     HexDia_Timer = 0;
+                    s_hex_yaw0 = Yaw_Deg;    /* 记下入环航向基准 */
                 }
             }
             else
@@ -346,7 +459,7 @@ void HexDia_Judge(void)
             break;
 
         case 2:
-            /* 环内: 维持右转; 丢线时转更多去找线; 导线从左侧出现即绕完 */
+            /* 环内: 维持右转; 丢线时转更多去找线; 绕够角度且导线从对侧出现即绕完 */
             HexDia_Timer++;
             if (HexDia_Lost())
             {
@@ -358,12 +471,8 @@ void HexDia_Judge(void)
                 Track_Steer_Bias = HEX_BIAS_KEEP * HEX_DIR;
                 Track_Speed_Ratio = HEX_SPD_KEEP;
             }
-            if (HexDia_Back_Pattern())
-            {
-                HexDia_Flag = 3;
-                HexDia_Timer = 0;
-            }
-            else if (HexDia_Timer >= HEX_IN_MAX)
+            if ((HexDia_Back_Pattern() && HexDia_Yaw_OK()) ||
+                (HexDia_Timer >= HEX_IN_MAX))
             {
                 HexDia_Flag = 3;
                 HexDia_Timer = 0;
@@ -382,6 +491,7 @@ void HexDia_Judge(void)
                 HexDia_Timer = 0;
                 Track_Steer_Bias = 0;
                 Track_Speed_Ratio = 1.0f;
+                HexDia_Cool = HEX_COOLDOWN;  /* 出环缓冲: 1s 内不再进环 */
             }
             break;
 
@@ -537,7 +647,7 @@ static void Track_Classify(void)
     /* 半圆弧与直角弯的区分: 两者误差都大, 但圆弧的误差"稳在中间"
      * (约 45~80), 直角弯往往直接顶到 90~100。 */
     else if ((s_arc_ms >= ARC_HOLD_MS) && (a < ARC_MAX_ERR)) want = TRK_ARC;
-    else if (Sharp_State  != 0)            want = TRK_SHARP;
+    else if (Curve_Grade_Now >= 2)         want = TRK_SHARP;
     else if (a > CURVE_STATE_TH)           want = TRK_CURVE;
     else                                   want = TRK_STRAIGHT;
 

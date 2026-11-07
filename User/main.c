@@ -180,7 +180,6 @@ void TIM1_UP_IRQHandler(void)
 
             /* 4.1 异常检测: 丢线 / 急弯(锯齿线、直角弯) */
             PID_LostLine_Check();
-            PID_Sharp_Check();
 
             /* 4.2 PD 循迹 */
             PID_Calculate();

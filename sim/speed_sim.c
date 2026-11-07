@@ -47,8 +47,10 @@ volatile int32_t Speed_Avg_mms = 0;
 uint8_t        Menu_SpdMode    = 0;                  /* 0=CL 闭环 */
 uint8_t        Menu_SpeedLevel = 1;
 /* 急弯 / 赛道元素: Motor.c 会读, 本仿真不链 PID.c/Ring_Judge.c, 给桩 */
-uint8_t        Sharp_State     = 0;
-int8_t         Sharp_Dir       = 1;
+volatile uint8_t Curve_Turn_Now = 0;
+volatile uint8_t Curve_Grade_Now = 0;
+volatile uint8_t Curve_Conf_Now = 0;
+volatile uint8_t Curve_Wrong_Now = 0;
 uint8_t        HexDia_Flag     = 0;
 uint8_t        Track_Straight  = 0;
 volatile float Error_H         = 0.0f;
@@ -291,31 +293,6 @@ int main(void)
     CHECK(s_duty_a - s_duty_b == 800, "PWM 档差速应为 ±400: 左 %d 右 %d", s_duty_a, s_duty_b);
     Speed_Delta = 0;
     Error_H = 0.0f;
-
-    /* ---- 10. 急弯: 内轮按当前误差实时缩放(无固定时长/角度) ---- */
-    printf("\n[10] 急弯内轮按误差实时缩放(%d%% 基准)\n", PWM_BASE_DUTY / 100);
-    Speed_Basic = SPEED_NOMINAL_MMS;    /* 350 -> 基准 3500 */
-    Sharp_State = 1;
-    Sharp_Dir   = 1;                    /* 左轮走、右轮停 */
-    Error = 60.0f; Error_H = 0.0f; Error_V = 0.0f;   /* 合成误差饱和 -> 内轮接近停 */
-    Run(100, NULL);
-    printf("  误差 60: 左 %d / 右 %d (右轮应接近停)\n", s_duty_a, s_duty_b);
-    CHECK(s_duty_a == PWM_BASE_DUTY, "外轮应保持基准 %d, 实际 %d", PWM_BASE_DUTY, s_duty_a);
-    CHECK(s_duty_b < 300,  "内轮应降到接近停转(基准7%%), 实际 %d", s_duty_b);
-
-    Error = 20.0f;                      /* 快回中 -> 内轮自动补速 */
-    Run(100, NULL);
-    printf("  误差 20: 左 %d / 右 %d (内轮应回升)\n", s_duty_a, s_duty_b);
-    CHECK(s_duty_b > 900, "误差收小后内轮应自动补速, 实际 %d", s_duty_b);
-
-    /* E=0 时即使还在急弯锁定, 也不许再压内轮转圈 */
-    Error = 0.0f;
-    Run(100, NULL);
-    printf("  E=0: 左 %d / 右 %d (应相同)\n", s_duty_a, s_duty_b);
-    CHECK(s_duty_a == s_duty_b, "E=0 时两轮占空比应相同: %d/%d", s_duty_a, s_duty_b);
-
-    Sharp_State = 0;
-    Error = 0.0f;
 
     /* ---- 11. 直道等速补偿: 右轮快 -> 压右轮、补左轮 ---- */
     printf("\n[11] 直道等速补偿(编码器)\n");

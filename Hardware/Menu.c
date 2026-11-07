@@ -15,10 +15,7 @@ uint8_t  Menu_Page        = 0;
 
 /* 电感标定模式 0=用固定标定值 1=运行中自动标定 */
 uint8_t  Menu_CalibMode   = 0;
-/* 急弯(锯齿线/直角弯)保持模式 0=关 1=开
- * 【默认关】45°/90°/110° 由新的"按角度分级 + 过程实时判断"逻辑处理,
- * 不再锁方向(锁方向是转反/回不来的主要来源)。需要对比时在菜单第 6 页打开。 */
-uint8_t  Menu_ZigEn       = 0;
+/* 【Sharp 锁方向开关已删除】直角弯不再锁方向, 改由 Curve_Update() 分级处理。 */
 /* 距离测试页显示模式 0=归一化 1=原始 2=峰值 3=编码器 4=编码器引脚 */
 uint8_t  Menu_DistRaw     = 0;
 
@@ -27,12 +24,10 @@ uint8_t  Menu_DistRaw     = 0;
 uint8_t  Menu_SpdMode     = SPD_MODE_PWM;
 
 /* 菜单页数(7 页):
- * 0=发车 1=标定 2=距离/编码器 3=Kp 4=Kd 5=模式开关(环/急弯) 6=滞后
- * 车速选择页已删除(车速固定 35% PWM), SpdMod 条目一并删除。 */
+ * 0=发车 1=标定 2=距离/编码器 3=Kp 4=Kd 5=模式开关(环) 6=元素判定
+ * 车速页 / Lag 页 / Sharp 锁方向 已全部删除: 误差直通, 直角弯由 PID.c
+ * 的 Curve_Update() 按角度分级 + 转弯过程实时判断处理。 */
 #define MENU_PAGES 7
-
-/* 模式页当前选中的条目: 0=六角环 1=急弯 */
-uint8_t Menu_Mode_Sel = 0;
 
 /* 菜单是否需要重画标签 */
 uint8_t Menu_Inited = 0;
@@ -77,6 +72,7 @@ void Menu_KeyHandler(uint8_t key)
                     Speed_Fault_Reset();         /* 故障标志重新检测 */
                     Track_StateMachine_Reset();  /* 赛道状态机 */
                     Cross_Reset();               /* 十字/路口状态机 */
+                    HexDia_Reset();              /* 六角环状态机 + 出环冷却(中途停车会有残留) */
                     PID_Apply_Reset();           /* 差速斜率/D 项残留清零 */
                     Menu_Running = 1;            /* 发车 */
                 }
@@ -128,85 +124,53 @@ void Menu_KeyHandler(uint8_t key)
             else          { if (kd < 100.0f) kd += 0.5f; }
             break;
 
-        case 5: /* 模式页: KEY3=选择条目  KEY4=切换该条目的值(只剩 HexDia / Sharp) */
-            if (key == 3)
-            {
-                Menu_Mode_Sel++;
-                if (Menu_Mode_Sel > 1) Menu_Mode_Sel = 0;
-            }
-            else
-            {
-                if (Menu_Mode_Sel == 0)
-                {
-                    Menu_HexDiaEn = !Menu_HexDiaEn;
-                }
-                else
-                {
-                    Menu_ZigEn = !Menu_ZigEn;
-                }
-            }
+        case 5: /* 模式页: 只剩 HexDia 一个条目, KEY4 切换 */
+            if (key == 4) Menu_HexDiaEn = !Menu_HexDiaEn;
             break;
 
-        case 6: /* 滞后页: 0=不延迟(默认) 1=完全延迟, 每按一次 1 */
+        case 6: /* 元素判定页: KEY3=复位元素状态机  KEY4=清零巡航基线重新学习 */
             if (key == 3)
             {
-                Lag_Ratio -= 1.0f;
-                if (Lag_Ratio < 0.0f) Lag_Ratio = 0.0f;
+                Menu_CrossCount = 0;
+                Cross_Reset();     /* 十字/路口状态机归零 */
+                HexDia_Reset();    /* 环状态机 + 出环冷却归零 */
+                PID_D_Reset();     /* 清 D 项残留 */
             }
             else
             {
-                Lag_Ratio += 1.0f;
-                if (Lag_Ratio > 1.0f) Lag_Ratio = 1.0f;
+                /* 清零后 Track_Judge 立即取当前值作为新基线重新跟随。
+                 * 换场地/改电感高度后用它代替"等基线慢慢收敛"。 */
+                H_Base = 0.0f;
+                V_Base = 0.0f;
             }
             break;
     }
 }
 
 /* ------------------------------------------------------------
- *  Kp / Kd / Lag 三页共用布局(16x4), 原来三页各写一遍, 合并后少 30 行:
+ *  Kp / Kd 两页共用布局(16x4):
  *    行2: 标题 + 步进提示
- *    行3: PID 页 = 误差 E / D 项 / 航向 Y;  Lag 页 = 比例 R / 实际延迟 K
+ *    行3: 误差 E / D 项 / 航向 Y
  *    行4: 参数值 + 输出差速 Dl
  * ------------------------------------------------------------ */
 static void Menu_TuneLabels(uint8_t page)
 {
-    if (page == 6)
-    {
-        OLED_ShowString(2, 1, "Lag x100 K3-/K4+");
-        OLED_ShowString(3, 1, "R");
-        OLED_ShowString(3, 6, "K");
-        OLED_ShowString(4, 1, "Lag:");
-    }
-    else
-    {
-        OLED_ShowString(2, 1, (page == 3) ? "Kp x10  K3-/K4+" : "Kd x10  K3-/K4+");
-        OLED_ShowString(3, 1, "E");
-        OLED_ShowString(3, 7, "D");
-        OLED_ShowString(3, 11, "Y");
-        OLED_ShowString(4, 1, (page == 3) ? "Kp:" : "Kd:");
-    }
+    OLED_ShowString(2, 1, (page == 3) ? "Kp x10  K3-/K4+" : "Kd x10  K3-/K4+");
+    OLED_ShowString(3, 1, "E");
+    OLED_ShowString(3, 7, "D");
+    OLED_ShowString(3, 11, "Y");
+    OLED_ShowString(4, 1, (page == 3) ? "Kp:" : "Kd:");
     OLED_ShowString(4, 9, "Dl");
 }
 
 static void Menu_TuneValues(uint8_t page)
 {
-    if (page == 6)
-    {
-        uint32_t lag = (uint32_t)(Lag_Ratio * 100.0f + 0.5f);
+    float k = (page == 3) ? kp : kd;
 
-        OLED_ShowNum(3, 2, lag, 3);          /* 前瞻比例 ×100 */
-        OLED_ShowNum(3, 7, Lag_Cycles, 3);   /* 当前实际延迟周期 */
-        OLED_ShowNum(4, 5, lag, 3);
-    }
-    else
-    {
-        float k = (page == 3) ? kp : kd;
-
-        OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
-        OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
-        OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
-        OLED_ShowNum(4, 5, (uint32_t)(k * 10.0f + 0.5f), 3);
-    }
+    OLED_ShowSignedNum(3, 2, (int32_t)Error_H, 4);
+    OLED_ShowSignedNum(3, 8, (int32_t)D_Filt, 3);
+    OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
+    OLED_ShowNum(4, 5, (uint32_t)(k * 10.0f + 0.5f), 3);
     OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
 }
 
@@ -216,14 +180,18 @@ void Menu_Display(void)
     if (!Menu_Inited)
     {
         OLED_Clear();
-        OLED_ShowString(1, 1, "== Menu ===");
+        /* 页码随页走: "== Menu 7/7", 现场不用再数 KEY2 按了几下 */
+        OLED_ShowString(1, 1, "== Menu ");
+        OLED_ShowNum(1, 9, (uint32_t)(Menu_Page + 1), 1);
+        OLED_ShowString(1, 10, "/7");
         switch (Menu_Page)
         {
-            case MENU_PAGE_START: /* 发车页: 顺带显示三个可调参数, 不用逐页确认 */
+            case MENU_PAGE_START: /* 发车页: 顺带显示可调参数与两个开关, 不用逐页确认 */
                 OLED_ShowString(2, 1, "Start");
                 OLED_ShowString(3, 1, "Kp");
                 OLED_ShowString(3, 6, "Kd");
-                OLED_ShowString(3, 11, "L");
+                OLED_ShowString(3, 11, "G");     /* 弯道角度档 0~3 */
+                OLED_ShowString(3, 13, "W");     /* 1=刚判定转错(封锁期) */
                 OLED_ShowString(4, 1, "K4:GO");
                 break;
             case 1: /* 标定: 当前模式 + 四路峰值(目标 3200~3550) */
@@ -296,14 +264,23 @@ void Menu_Display(void)
             case 4:
                 Menu_TuneLabels(Menu_Page);
                 break;
-            case 5: /* 模式页: 两个条目 */
-                OLED_ShowString(1, 1, "= Mode 1/2 =");
+            case 5: /* 模式页: 单条目 */
+                OLED_ShowString(1, 1, "= Mode 1/1 =");
                 OLED_ShowString(2, 1, " HexDia     ");
-                OLED_ShowString(3, 1, " Sharp      ");
+                OLED_ShowString(3, 1, "            ");
                 OLED_ShowString(4, 1, "            ");
                 break;
-            case 6: /* 滞后页: 比例 + 实际延迟周期 */
-                Menu_TuneLabels(6);
+            case 6: /* 元素判定页: 十字/环状态机内部量 + 巡航基线 + 编码器航向 */
+                OLED_ShowString(2, 1, "X");
+                OLED_ShowString(2, 4, "H");
+                OLED_ShowString(2, 7, "F");
+                OLED_ShowString(2, 10, "V");
+                OLED_ShowString(3, 1, "bH");
+                OLED_ShowString(3, 6, "bV");
+                OLED_ShowString(3, 11, "Y");
+                OLED_ShowString(4, 1, "S");
+                OLED_ShowString(4, 4, "C");
+                OLED_ShowString(4, 8, "tH");
                 break;
         }
         Menu_Inited = 1;
@@ -312,10 +289,11 @@ void Menu_Display(void)
     /* 只更新数值 */
     switch (Menu_Page)
     {
-        case MENU_PAGE_START: /* 发车: Kp / Kd / Lag 一览 + 运行状态 */
+        case MENU_PAGE_START: /* 发车: Kp / Kd / 环与急弯开关一览 + 运行状态 */
             OLED_ShowNum(3, 3,  (uint32_t)(kp * 10.0f + 0.5f), 3);
             OLED_ShowNum(3, 8,  (uint32_t)(kd * 10.0f + 0.5f), 3);
-            OLED_ShowNum(3, 12, (uint32_t)(Lag_Ratio * 100.0f + 0.5f), 3);
+            OLED_ShowNum(3, 12, (uint32_t)Curve_Grade_Now, 1);
+            OLED_ShowNum(3, 14, (uint32_t)Curve_Wrong_Now, 1);
             OLED_ShowString(4, 7, (Menu_Running == 1) ? "RUN " : "IDLE");
             break;
         case 1: /* 标定: 模式 0=固定 1=自动 + 四路 MAX 峰值 */
@@ -397,16 +375,25 @@ void Menu_Display(void)
         case 4:
             Menu_TuneValues(Menu_Page);
             break;
-        case 5: /* 模式页: 选中标记 + 两个条目的值 */
-            OLED_ShowNum(1, 8, (uint32_t)(Menu_Mode_Sel + 1), 1);
-            OLED_ShowString(2, 1, (Menu_Mode_Sel == 0) ? ">" : " ");
-            OLED_ShowString(3, 1, (Menu_Mode_Sel == 1) ? ">" : " ");
-            OLED_ShowString(4, 1, " ");
+        case 5: /* 模式页数值: 只有 HexDia */
+            OLED_ShowNum(1, 8, 1, 1);
+            OLED_ShowString(2, 1, ">");
             OLED_ShowNum(2, 12, Menu_HexDiaEn, 1);
-            OLED_ShowNum(3, 12, Menu_ZigEn, 1);
             break;
-        case 6: /* 滞后页 */
-            Menu_TuneValues(6);
+        case 6: /* 元素判定页数值 */
+            /* 行2: X=十字阶段(0~2) H=环状态(0~3) F=出环冷却中 V=竖置场强 */
+            OLED_ShowNum(2, 2,  (uint32_t)Cross_Stage, 1);
+            OLED_ShowNum(2, 5,  (uint32_t)HexDia_Flag, 1);
+            OLED_ShowNum(2, 8,  (uint32_t)(HexDia_Cool > 0), 1);
+            OLED_ShowNum(2, 11, (uint16_t)ADC_V_StrengthF, 2);
+            /* 行3: 横/竖巡航基线 + 编码器航向(度) */
+            OLED_ShowNum(3, 3,  (uint32_t)H_Base, 2);
+            OLED_ShowNum(3, 8,  (uint32_t)V_Base, 2);
+            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
+            /* 行4: S=赛道状态 C=十字计数 tH=环内计时 */
+            OLED_ShowNum(4, 2,  (uint32_t)Track_State, 1);
+            OLED_ShowNum(4, 5,  Menu_CrossCount, 2);
+            OLED_ShowNum(4, 10, (uint32_t)HexDia_Timer, 3);
             break;
     }
 }
@@ -417,7 +404,7 @@ static char *Menu_RunStateCode(void)
 {
     if (Cross_Stage != 0 || Track_Straight) return "X";
     if (HexDia_Flag != 0) return "H";
-    if (Sharp_State) return "R";
+    if (Curve_Grade_Now >= 2) return "R";
     if (Lost_State) return "L";
 
     switch (Track_State)
@@ -437,7 +424,7 @@ static char *Menu_RunStateCode(void)
 static char *Menu_RunTurnCode(void)
 {
     if (Track_Straight || Cross_Stage != 0) return "F";
-    if (Sharp_State) return (Sharp_Dir > 0) ? "R" : "L";
+    if (Curve_Turn_Now) return (Speed_Delta > 0) ? "R" : "L";
     if (Speed_Delta > 40) return "R";
     if (Speed_Delta < -40) return "L";
     return "F";
