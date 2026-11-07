@@ -10,6 +10,7 @@ extern volatile float D_Filt;
 /* 弯道分级/转弯过程实时状态(菜单"弯道判定页"显示, 拍视频看数据用) */
 extern volatile uint8_t Curve_Grade_Now;   /* 0直道 1=45° 2=90° 3=110° */
 extern volatile uint8_t Curve_Turn_Now;    /* 1=转弯进行中 */
+extern volatile int8_t Curve_Turn_Dir;     /* 转弯输出方向: +1右转, -1左转 */
 extern volatile uint8_t Curve_Conf_Now;    /* 同方向确认计数 */
 extern volatile uint8_t Curve_Wrong_Now;   /* 1=刚判定转错(封锁期) */
 void PID_Curve_Reset(void);

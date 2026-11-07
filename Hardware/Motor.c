@@ -33,8 +33,7 @@
  * 0.45 = 折中: 弯道降到 45% 时, 差速收成原来的 0.75。 */
 #define DELTA_SPEED_KEEP  0.45f
 
-/* 【急弯内轮压停参数已删除】直角弯不再把内轮压到接近停转,
- * 改为"瞬间降速 + 按剩余误差渐进给差速", 见 PID.c 的 Curve_Update()。 */
+/* 急弯期间由实时转向方向停内轮, 外轮使用已调度的低速基准。 */
 
 /* ---- 直道等速补偿(编码器) ----
  * 直行时两轮目标占空比完全相同, 但电机特性/阻力/轮胎直径不完全一致,
@@ -228,8 +227,8 @@ void CarMotor_Control(void)
     float dl, dr;
     float k, delta, tl, tr, al, ar, cap_l, cap_r;
 
-    /* ---- 方式二: 纯 PWM 开环(车速固定 35%, 现在是唯一入口) ----
-     * 基准占空比固定 PWM_BASE_DUTY(35%), 循迹差速按原量纲直接叠加,
+    /* ---- 方式二: 纯 PWM 开环(车速基准 30%, 现在是唯一入口) ----
+     * 基准占空比固定 PWM_BASE_DUTY(30%), 循迹差速按原量纲直接叠加,
      * 完全不进速度环。弯道降速仍然生效: 按调度后的比例缩放基准占空比
      * (Speed_Basic 已被 PID_Speed_Schedule 按 0.20~1.0 缩放过)。 */
     if (Menu_SpdMode == SPD_MODE_PWM)
@@ -251,13 +250,19 @@ void CarMotor_Control(void)
          * 基准 1575 配上 900 的差速 -> 内轮 675、外轮 2475,
          * 轮速比接近 4:1, 车在小半径里"原地急转"再甩出去。
          * 这就是现场"转弯角度太大 / 十字出口甩尾"的主因。 */
-        d = (float)Speed_Delta * (1.0f - DELTA_SPEED_KEEP * (1.0f - ratio));
+        d = (float)Speed_Delta * (1.0f - DELTA_SPEED_KEEP * (1.0f - ratio)) * STEER_SIGN;
 
 #if STRAIGHT_EQ_EN
         /* 直道等速: 用编码器把两轮实际速度拉平(只调分配, 不改车速)。
          * 【判直道必须用横/竖各自误差】合成 Error 可能被横竖抵消成 0,
          * 那时车其实还在弯里, 用 Error 判断会把补偿积分带偏并固化成恒定差速 -> 转圈。 */
+        /* 只在"循迹几乎不打方向"时才做等速补偿。
+         * 旧条件只看误差 < 12 就补偿, 而偏 10 时循迹正要给 120 差速,
+         * EQ 立刻把这两轮速度拉平 -> 差速被吃掉, 车一直带着偏置走,
+         * 现场表现就是"直道不调整、一直往一边偏"。
+         * 加 Speed_Delta < 30 的门限: 只有真正居中(Δ≈0)才补电机不对称。 */
         if ((fabsf(Error_H) < EQ_STRAIGHT_TH) && (fabsf(Error_V) < EQ_STRAIGHT_TH) &&
+            (fabsf((float)Speed_Delta) < 30.0f) &&
             !Curve_Turn_Now && !Track_Straight && (HexDia_Flag == 0) && !Lost_State)
         {
             float vr = (float)Speed_R_mms;
@@ -293,10 +298,25 @@ void CarMotor_Control(void)
         dl = base + d;
         dr = base - d;
 
-        /* 【急弯内轮压停块已删除】
-         * 直角弯改为: 确认后立刻降速(PID_Speed_Schedule), 再按剩余误差
-         * 渐进给差速(Curve_Update 的 ramp), 转够/转错立刻收。
-         * 不再把内轮压到接近停转 —— 那是转过头、出弯甩尾的来源。 */
+        /* 90°/110° 弯按实时传感器闭环转向: 外轮保持弯道降速后的基准,
+         * 内轮停转；传感器确认回线后立刻交回循迹，不用固定等待时间。
+         * 环、十字、丢线搜索仍由各自状态机处理。 */
+        if (Curve_Turn_Now && (Curve_Grade_Now >= 2) &&
+            (HexDia_Flag == 0) && !Track_Straight && !Lost_State)
+        {
+            float tdir = (float)Curve_Turn_Dir * STEER_SIGN;
+
+            if (tdir > 0.0f)
+            {
+                dl = base;
+                dr = 0.0f;
+            }
+            else if (tdir < 0.0f)
+            {
+                dl = 0.0f;
+                dr = base;
+            }
+        }
 
         if (dl > (float)PWM_DUTY_MAX) dl = (float)PWM_DUTY_MAX;
         if (dr > (float)PWM_DUTY_MAX) dr = (float)PWM_DUTY_MAX;
@@ -317,9 +337,27 @@ void CarMotor_Control(void)
 
     /* ---- 方式一: 编码器闭环 / 前馈开环(目标 mm/s) ---- */
     k     = (float)Speed_Basic / 5000.0f;   /* 差速量纲换算 */
-    delta = (float)Speed_Delta * k;
+    delta = (float)Speed_Delta * k * STEER_SIGN;
     tl    = (float)Speed_Basic + delta;
     tr    = (float)Speed_Basic - delta;
+
+    if (Curve_Turn_Now && (Curve_Grade_Now >= 2) &&
+        (HexDia_Flag == 0) && !Track_Straight && !Lost_State)
+    {
+        float tdir = (float)Curve_Turn_Dir * STEER_SIGN;
+
+        if (tdir > 0.0f)
+        {
+            tl = (float)Speed_Basic;
+            tr = 0.0f;
+        }
+        else if (tdir < 0.0f)
+        {
+            tl = 0.0f;
+            tr = (float)Speed_Basic;
+        }
+    }
+
     al    = 0.0f;
     ar    = 0.0f;
 

@@ -47,9 +47,15 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
  * ------------------------------------------------------------ */
 #define ABS_MIN        4     /* 绝对下限: 归一化值低于此视为噪声 */
 
-/* 十字路口 —— 竖置电感的本职工作 */
-#define CROSS_V_MIN      40    /* 竖置归一化 >= 40(其峰值标定为 100, 即达峰值40%) */
-#define CROSS_V_BASE_MIN 8     /* 竖置巡航基线高于此值时才启用"相对抬升"判断 */
+/* 十字路口 —— 竖置电感的本职工作 (用【原始 ADC 值】判断, 不用归一化:
+ * 归一化在 MAX 标定偏低时会饱和, 十字会漏检或直道误判) */
+#define CROSS_V_RAW_MIN    600    /* 竖置原始均值 >=600 才算"抬头"(直道 <500 忽略) */
+#define CROSS_V_RAW_STRONG 1800   /* 竖置特别强 = 确定交叉点, 放宽左右对称要求 */
+#define CROSS_H_RAW_MIN    300    /* 横置两路都要有实质信号(真十字两根线同时激励) */
+#define CROSS_V_RAW_RELEASE 400   /* 竖置回落到此以下 = 交叉线已过 */
+#define CROSS_V_BASE_RAW_MIN 250  /* 竖置巡航基线高于此才启用"相对抬升" */
+#define CROSS_V_MIN      40    /* (保留: 归一化口径, 仅文档/调试参考) */
+#define CROSS_V_BASE_MIN 8     /* (保留) */
 #define CROSS_V_RISE     1.8f  /* 竖置须达到自身巡航基线的 1.8 倍 */
 #define CROSS_BAL        45    /* 横置左右偏差(%)须 <= 45 才认十字 —— 见下方说明 */
 #define CROSS_ERR_MAX    28.0f /* 横置误差 > 35 = 正在转弯, 不认十字。
@@ -92,10 +98,10 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 #define HEX_IN_MAX       220   /* 环内最长 220 周期(1.1s) */
 #define HEX_EXIT_MAX     60    /* 出环最长 60 周期(300ms) */
 #define HEX_BACK_DIFF    35    /* 出环: 导线从对侧重新出现的落差阈值(%) */
-#define HEX_BIAS_IN      (-1000) /* 进环转向偏置(负=右转, 乘 HEX_DIR 镜像), 加大转角 */
-#define HEX_BIAS_KEEP    (-500)  /* 环内保持偏置, 六边形每段都要转够 */
-#define HEX_BIAS_SEARCH  (-800)  /* 环内丢线时的找线偏置(转更多) */
-#define HEX_BIAS_OUT     (-650)  /* 出环偏置 */
+#define HEX_BIAS_IN      (+1000) /* 进环转向偏置(正=右转, 乘 HEX_DIR 镜像), 加大转角 */
+#define HEX_BIAS_KEEP    (+500)  /* 环内保持偏置, 六边形每段都要转够 */
+#define HEX_BIAS_SEARCH  (+800)  /* 环内丢线时的找线偏置(转更多) */
+#define HEX_BIAS_OUT     (+650)  /* 出环偏置 */
 
 /* 出环冷却(防连判): 出环完成后一段时间内不接受入口特征。
  * 出环过程中横置仍带着偏侧、竖置也可能没落干净, 立即重判容易把
@@ -120,8 +126,11 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 /* 横置/竖置各自的巡航基线: 只在非元素期间缓慢跟随, 反映"平时这个类型的
  * 电平有多高"。竖置平时接近 0, 十字处猛升 -> 相对抬升倍数就是很好的判据。
  * 注意是【各类型各一个基线】, 绝不混算。 */
-float H_Base = 0.0f;    /* 横置基线 */
-float V_Base = 0.0f;    /* 竖置基线 */
+float H_Base = 0.0f;    /* 横置基线(归一化) */
+float V_Base = 0.0f;    /* 竖置基线(归一化) */
+/* 原始值基线: 十字判据用原始值, 避免归一化饱和造成的漏判/误判 */
+float H_Base_Raw = 0.0f;
+float V_Base_Raw = 0.0f;
 #define BASE_ALPHA 0.01f
 
 /* ------------------------------------------------------------
@@ -136,28 +145,30 @@ float V_Base = 0.0f;    /* 竖置基线 */
  * ------------------------------------------------------------ */
 static uint8_t Cross_Pattern(void)
 {
-    float v = ADC_V_StrengthF;
-    float hsum = ADC_Lf + ADC_Rf;
+    float v_raw = (((float)ADC_Value[2] - (float)ADC_MIN[2]) + ADC_Raw_MR) * 0.5f;  /* 竖置原始均值(已补 MR 75%) */
+    float l_raw = (float)ADC_Value[3];
+    float r_raw = (float)ADC_Value[0];
+    float hsum  = l_raw + r_raw;
     float hbias;
 
     /* 横置误差大 = 车正在转弯, 绝不是十字(根治 90° 弯被强制直行导致转晚) */
     if (fabsf(Error_H) > (float)CROSS_ERR_MAX) return 0;
 
-    /* 竖置必须明显抬头: 这是复合布局下十字的核心特征 */
-    if (v < (float)CROSS_V_MIN) return 0;
+    /* 竖置原始值必须明显抬头: 这是复合布局下十字的核心特征 */
+    if (v_raw < (float)CROSS_V_RAW_MIN) return 0;
 
     /* 若竖置平时也有可观读数(基线偏高), 还要求相对自身基线明显抬升 */
-    if (V_Base > (float)CROSS_V_BASE_MIN && v < V_Base * CROSS_V_RISE) return 0;
+    if (V_Base_Raw > (float)CROSS_V_BASE_RAW_MIN && v_raw < V_Base_Raw * CROSS_V_RISE) return 0;
 
     /* 横置两路都要有实质信号: 真十字是两根线同时激励。
      * 直角弯只有单侧导线, 常出现一侧很强另一侧接近 0 -> 在这里被排除。 */
-    if ((ADC_Lf < 20.0f) || (ADC_Rf < 20.0f)) return 0;
+    if ((l_raw < (float)CROSS_H_RAW_MIN) || (r_raw < (float)CROSS_H_RAW_MIN)) return 0;
 
     /* 横置必须有信息, 且在左右方向上基本对称(排除直角弯)。
      * 竖置特别强时放宽对称要求, 避免真实十字因轻微偏心被漏掉(没成绩)。 */
-    if (hsum < 2.0f) return 0;
-    hbias = fabsf(ADC_Lf - ADC_Rf) / hsum * 100.0f;
-    if (v >= (float)CROSS_V_STRONG)
+    if (hsum < 2.0f * (float)CROSS_H_RAW_MIN) return 0;
+    hbias = fabsf(l_raw - r_raw) / hsum * 100.0f;
+    if (v_raw >= (float)CROSS_V_RAW_STRONG)
     {
         if (hbias > (float)CROSS_BAL_STRONG) return 0;
     }
@@ -287,11 +298,11 @@ void Cross_Judge(void)
                  * 至少已直行 CROSS_RELEASE_MIN, 且回落要连续确认, 防止
                  * 路口中间的瞬时凹谷把车提前放出去。 */
                 {
-                    float rel_th = (V_Base > (float)CROSS_V_BASE_MIN)
-                                 ? V_Base * 1.3f : (float)CROSS_V_RELEASE;
+                    float v_now = (((float)ADC_Value[2] - (float)ADC_MIN[2]) + ADC_Raw_MR) * 0.5f;
+                    float rel_th = (V_Base_Raw > (float)CROSS_V_BASE_RAW_MIN)
+                                 ? V_Base_Raw * 0.75f : (float)CROSS_V_RAW_RELEASE;
 
-                    if ((Cross_Timer >= CROSS_RELEASE_MIN) &&
-                        (ADC_V_StrengthF < rel_th))
+                    if ((Cross_Timer >= CROSS_RELEASE_MIN) && (v_now < rel_th))
                     {
                         if (s_cross_rel < 60000) s_cross_rel++;
                         if (s_cross_rel >= CROSS_RELEASE_CNT)
@@ -405,7 +416,7 @@ void HexDia_Reset(void)
 
 void HexDia_Judge(void)
 {
-    if (Menu_HexDiaEn == 0)
+    if ((Menu_HexDiaEn == 0) && !Menu_DetectMonitor)
     {
         HexDia_Flag = 0;
         HexDia_Timer = 0;
@@ -525,7 +536,7 @@ void HexDia_Judge(void)
 #define FLIP_SLOW_CNT      2       /* 慢速反转 2 次 -> S弯/双直道 */
 #define FLIP_FORGET_MS     1500    /* 超过 1.5s 没反转, 计数清零 */
 #define CURVE_STATE_TH     22.0f   /* 进入"普通弯"的误差门槛 */
-#define ARC_ERR_MIN        40.0f   /* 半圆弧: 误差要持续大于此值 */
+#define ARC_ERR_MIN        32.0f   /* 半圆弧: 误差要持续大于此值(原 40 卡边界) */
 #define ARC_MAX_ERR       80.0f    /* 超过这个更像直角弯, 不算圆弧 */
 #define ARC_HOLD_MS        400     /* 半圆弧: 持续 400ms 才认定 */
 #define STATE_CONFIRM      2       /* 新状态确认周期数(5ms/次) */
@@ -539,6 +550,9 @@ static uint8_t  s_cand = TRK_STRAIGHT;   /* 候选状态 */
 static uint8_t  s_cand_cnt = 0;
 static uint8_t  s_flip_fast = 0;
 static uint8_t  s_flip_slow = 0;
+/* 调试用: 菜单/仿真可以直接看到反转计数, 判断 S 弯/锯齿为什么没识别 */
+volatile uint8_t Dbg_FlipFast = 0;
+volatile uint8_t Dbg_FlipSlow = 0;
 static uint16_t s_since_flip = 0;
 static uint16_t s_arc_ms = 0;
 static int8_t   s_last_sign = 0;
@@ -571,8 +585,8 @@ static void Track_Apply(uint8_t st)
         case TRK_STRAIGHT: ratio = 1.00f; kd_g = 1.0f; break;
         case TRK_CURVE:    ratio = 1.00f; kd_g = 1.0f; break;  /* 降速由误差调度负责 */
         case TRK_ARC:      ratio = 0.90f; kd_g = 1.1f; break;  /* 半圆弧: 稳住, 别猛打 */
-        case TRK_S_CURVE:  ratio = 0.65f; kd_g = 1.6f; break;  /* 双直道/S弯: 加阻尼防超调 */
-        case TRK_ZIGZAG:   ratio = 0.55f; kd_g = 1.8f; break;  /* 锯齿: 更要阻尼 */
+        case TRK_S_CURVE:  ratio = 0.75f; kd_g = 1.6f; break;  /* S弯: 速度给大一点, 暂停 0.65 */
+        case TRK_ZIGZAG:   ratio = 0.65f; kd_g = 1.8f; break;  /* 锯齿: 0.55 -> 0.65, 不再爬行 */
         case TRK_SHARP:    ratio = 1.00f; kd_g = 1.0f; break;  /* 急弯自己的 0.55 系数已生效 */
         case TRK_CROSS:    ratio = 1.00f; kd_g = 1.0f; break;
         case TRK_HEXDIA:   ratio = 1.00f; kd_g = 1.0f; break;
@@ -603,13 +617,20 @@ static void Track_Classify(void)
         s_since_flip = 0;
     }
 
-    if ((sg != 0) && (s_last_sign != 0) && (sg != s_last_sign) && (a > FLIP_ERR_MIN))
+    /* 只有"有意义的误差幅值"才更新方向记忆。
+     * 旧写法在误差过零瞬间(|E|还很小)就把 s_last_sign 更新成新符号,
+     * 等真正反向的大误差到来时 sg 已经等于 s_last_sign -> 反转永远数不到,
+     * 表现就是 S 弯/锯齿识别不出来、被当成直角弯。 */
+    if ((sg != 0) && (a > FLIP_ERR_MIN))
     {
-        if      (s_since_flip < FLIP_FAST_MS) s_flip_fast++;
-        else if (s_since_flip < FLIP_SLOW_MS) s_flip_slow++;
-        s_since_flip = 0;
+        if ((s_last_sign != 0) && (sg != s_last_sign))
+        {
+            if      (s_since_flip < FLIP_FAST_MS) s_flip_fast++;
+            else if (s_since_flip < FLIP_SLOW_MS) s_flip_slow++;
+            s_since_flip = 0;
+        }
+        s_last_sign = sg;
     }
-    if (sg != 0) s_last_sign = sg;
 
     /* 回中后很快清空反转计数: 否则 S弯/锯齿会拖尾到后面的直道上 */
     if (a < 10.0f)
@@ -686,12 +707,25 @@ static void Track_Classify(void)
 
     if (Track_State_Ms < 65000) Track_State_Ms += 5;
 
+    Dbg_FlipFast = s_flip_fast;
+    Dbg_FlipSlow = s_flip_slow;
+
     Track_Apply(Track_State);
 }
+
+/* 推车检测页用的元素计数(只在识别成功时 +1, 供菜单显示) */
+volatile uint16_t Menu_CurveCount = 0;   /* 弯道(45° 及以上) */
+volatile uint16_t Menu_SharpCount = 0;   /* 直角/大弯(90° 及以上) */
+volatile uint16_t Menu_RingCount  = 0;   /* 圆环 */
 
 /* 总判断函数, 在中断中调用 */
 void Track_Judge(void)
 {
+    static uint8_t  s_grade_prev = 0;
+    static uint8_t  s_ring_prev  = 0;
+    float h_raw_now;
+    float v_raw_now;
+
     Track_Steer_Bias = 0;
     Track_Speed_Ratio = 1.0f;
 
@@ -699,8 +733,29 @@ void Track_Judge(void)
     HexDia_Judge();
     Track_Classify();      /* 赛道状态分类(直道/弯/急弯/S弯/圆弧/锯齿...) */
 
+    /* ---- 推车/跑车共用的元素计数(上升沿) ---- */
+    if ((Curve_Grade_Now >= 2) && (s_grade_prev < 2))
+    {
+        Menu_SharpCount++;
+    }
+    else if ((Curve_Grade_Now >= 1) && (s_grade_prev == 0))
+    {
+        Menu_CurveCount++;
+    }
+    s_grade_prev = Curve_Grade_Now;
+
+    if ((HexDia_Flag == 1) && (s_ring_prev == 0))
+    {
+        Menu_RingCount++;
+    }
+    s_ring_prev = (HexDia_Flag == 1) ? 1 : 0;
+
     /* 横置/竖置各自的巡航基线: 只在"没有任何元素状态"时才更新,
-     * 这样它反映的是平日巡航时的电平, 而不是元素处的峰值。 */
+     * 这样它反映的是平日巡航时的电平, 而不是元素处的峰值。
+     * Raw 版本给十字判据用(不受归一化饱和影响)。 */
+    h_raw_now = (float)ADC_Value[3] + (float)ADC_Value[0];
+    v_raw_now = (((float)ADC_Value[2] - (float)ADC_MIN[2]) + ADC_Raw_MR) * 0.5f;
+
     if ((Cross_Stage == 0) && (HexDia_Flag == 0))
     {
         if (H_Base <= 0.0f)
@@ -719,6 +774,24 @@ void Track_Judge(void)
         else
         {
             V_Base += (ADC_V_StrengthF - V_Base) * BASE_ALPHA;
+        }
+
+        if (H_Base_Raw <= 0.0f)
+        {
+            H_Base_Raw = h_raw_now;
+        }
+        else
+        {
+            H_Base_Raw += (h_raw_now - H_Base_Raw) * BASE_ALPHA;
+        }
+
+        if (V_Base_Raw <= 0.0f)
+        {
+            V_Base_Raw = v_raw_now;
+        }
+        else
+        {
+            V_Base_Raw += (v_raw_now - V_Base_Raw) * BASE_ALPHA;
         }
     }
 }

@@ -14,12 +14,13 @@ uint8_t  Menu_CrossCount  = 0;
 uint8_t  Menu_Page        = 0;
 
 /* 电感标定模式 0=用固定标定值 1=运行中自动标定 */
-uint8_t  Menu_CalibMode   = 0;
+uint8_t  Menu_CalibMode   = 1;   /* 上电默认自动标定(跟随峰值/本底, 换场地不用手动重标) */
 /* 【Sharp 锁方向开关已删除】直角弯不再锁方向, 改由 Curve_Update() 分级处理。 */
 /* 距离测试页显示模式 0=归一化 1=原始 2=峰值 3=编码器 4=编码器引脚 */
 uint8_t  Menu_DistRaw     = 0;
+volatile uint8_t Menu_DetectMonitor = 0;
 
-/* 速度控制方式: 【固定 35% PWM 开环】, 不再可选(车速选择已删除)。
+/* 速度控制方式: 【固定 30% PWM 开环】, 不再可选(车速选择已删除)。
  * 变量保留是为了让 Motor.c 的执行路径与主机端仿真正常工作。 */
 uint8_t  Menu_SpdMode     = SPD_MODE_PWM;
 
@@ -65,7 +66,11 @@ void Menu_KeyHandler(uint8_t key)
                 }
                 else
                 {
+                    Menu_DetectMonitor = 0;
                     Menu_CrossCount = 0;         /* 路口计数(只显示用) */
+                    Menu_CurveCount = 0;
+                    Menu_SharpCount = 0;
+                    Menu_RingCount  = 0;
 
                     /* 发车前把闭环/状态机的状态清干净 */
                     Speed_Loop_Reset();          /* 速度环积分 */
@@ -74,6 +79,9 @@ void Menu_KeyHandler(uint8_t key)
                     Cross_Reset();               /* 十字/路口状态机 */
                     HexDia_Reset();              /* 六角环状态机 + 出环冷却(中途停车会有残留) */
                     PID_Apply_Reset();           /* 差速斜率/D 项残留清零 */
+                    ADC_Zero_Reset();            /* 直道零点重新学(发车位置可能不同) */
+                    H_Base_Raw = 0.0f;
+                    V_Base_Raw = 0.0f;
                     Menu_Running = 1;            /* 发车 */
                 }
             }
@@ -114,34 +122,55 @@ void Menu_KeyHandler(uint8_t key)
             }
             break;
 
-        case 3: /* Kp 在线调参(横置/直道 PID), 上限 100 便于现场直接拧到 90 */
-            if (key == 3) { if (kp > 1.0f)   kp -= 0.5f; }
-            else          { if (kp < 100.0f) kp += 0.5f; }
+        case 3: /* Kp 在线调参(横置/直道 PID), 显示上限 99.5 */
+            if (key == 3) { if (kp > 1.0f)  kp -= 0.5f; }
+            else          { if (kp < 99.5f) kp += 0.5f; }
             break;
 
-        case 4: /* Kd 在线调参(横置/直道 PID), 上限 100 */
-            if (key == 3) { if (kd > 0.0f)   kd -= 0.5f; }
-            else          { if (kd < 100.0f) kd += 0.5f; }
+        case 4: /* Kd 在线调参(横置/直道 PID), 显示上限 99.5 */
+            if (key == 3) { if (kd > 0.0f)  kd -= 0.5f; }
+            else          { if (kd < 99.5f) kd += 0.5f; }
             break;
 
         case 5: /* 模式页: 只剩 HexDia 一个条目, KEY4 切换 */
             if (key == 4) Menu_HexDiaEn = !Menu_HexDiaEn;
             break;
 
-        case 6: /* 元素判定页: KEY3=复位元素状态机  KEY4=清零巡航基线重新学习 */
+        case 6: /* 元素监视页: KEY3=停车监视开/关, KEY4=清零巡航基线 */
             if (key == 3)
             {
+                if (Menu_Running != 0) break;   /* 跑车中不切监视, 防止误触 */
+                Menu_DetectMonitor = !Menu_DetectMonitor;
                 Menu_CrossCount = 0;
-                Cross_Reset();     /* 十字/路口状态机归零 */
-                HexDia_Reset();    /* 环状态机 + 出环冷却归零 */
-                PID_D_Reset();     /* 清 D 项残留 */
+                Menu_CurveCount = 0;
+                Menu_SharpCount = 0;
+                Menu_RingCount  = 0;
+                Track_StateMachine_Reset();
+                Cross_Reset();
+                HexDia_Reset();
+                PID_Apply_Reset();
+                ADC_Zero_Reset();
+                H_Base = 0.0f;
+                V_Base = 0.0f;
+                H_Base_Raw = 0.0f;
+                V_Base_Raw = 0.0f;
             }
             else
             {
-                /* 清零后 Track_Judge 立即取当前值作为新基线重新跟随。
-                 * 换场地/改电感高度后用它代替"等基线慢慢收敛"。 */
+                /* KEY4 = 清零计数, 不用退出再进; 基线一起重取,
+                 * 换场地/改电感高度后不用等慢慢收敛。 */
+                Menu_CrossCount = 0;
+                Menu_CurveCount = 0;
+                Menu_SharpCount = 0;
+                Menu_RingCount  = 0;
+                Track_StateMachine_Reset();
+                Cross_Reset();
+                HexDia_Reset();
+                PID_Apply_Reset();
                 H_Base = 0.0f;
                 V_Base = 0.0f;
+                H_Base_Raw = 0.0f;
+                V_Base_Raw = 0.0f;
             }
             break;
     }
@@ -173,6 +202,8 @@ static void Menu_TuneValues(uint8_t page)
     OLED_ShowNum(4, 5, (uint32_t)(k * 10.0f + 0.5f), 3);
     OLED_ShowSignedNum(4, 11, Speed_Delta, 3);
 }
+
+static char *Menu_RunTurnCode(void);
 
 /* 显示菜单页 - 首次画标签, 之后只更新数字 */
 void Menu_Display(void)
@@ -270,17 +301,16 @@ void Menu_Display(void)
                 OLED_ShowString(3, 1, "            ");
                 OLED_ShowString(4, 1, "            ");
                 break;
-            case 6: /* 元素判定页: 十字/环状态机内部量 + 巡航基线 + 编码器航向 */
-                OLED_ShowString(2, 1, "X");
-                OLED_ShowString(2, 4, "H");
-                OLED_ShowString(2, 7, "F");
-                OLED_ShowString(2, 10, "V");
-                OLED_ShowString(3, 1, "bH");
-                OLED_ShowString(3, 6, "bV");
-                OLED_ShowString(3, 11, "Y");
-                OLED_ShowString(4, 1, "S");
-                OLED_ShowString(4, 4, "C");
-                OLED_ShowString(4, 8, "tH");
+            case 6: /* 第 7 页: 推车检测(不运行时 K3 开始/结束, K4 清零)
+                 *   C=弯道  X=十字  R=圆环  S=直角/大弯
+                 *   E=横置误差  Y=航向角 */
+                OLED_ShowString(1, 1, "MON:OFF K3:START");
+                OLED_ShowString(2, 1, "C");
+                OLED_ShowString(2, 7, "X");
+                OLED_ShowString(3, 1, "R");
+                OLED_ShowString(3, 7, "S");
+                OLED_ShowString(4, 1, "E");
+                OLED_ShowString(4, 9, "Y");
                 break;
         }
         Menu_Inited = 1;
@@ -357,12 +387,14 @@ void Menu_Display(void)
                 if (Menu_DistRaw == 1)
                 {
                     h1 = ADC_Value[3];  h2 = ADC_Value[0];   /* L, R   */
-                    v1 = ADC_Value[2];  v2 = ADC_Value[1];   /* ML, MR */
+                    v1 = ADC_Value[2];                       /* ML     */
+                    v2 = (uint16_t)((uint32_t)ADC_Value[1] * 3u / 4u); /* MR ×0.75(硬件增益偏大) */
                 }
                 else
                 {
                     h1 = ADC_Peak[3];   h2 = ADC_Peak[0];
-                    v1 = ADC_Peak[2];   v2 = ADC_Peak[1];
+                    v1 = ADC_Peak[2];
+                    v2 = (uint16_t)((uint32_t)ADC_Peak[1] * 3u / 4u);  /* MR ×0.75 */
                 }
                 OLED_ShowNum(2, 2, h1, 4);
                 OLED_ShowNum(2, 7, h2, 4);
@@ -380,20 +412,15 @@ void Menu_Display(void)
             OLED_ShowString(2, 1, ">");
             OLED_ShowNum(2, 12, Menu_HexDiaEn, 1);
             break;
-        case 6: /* 元素判定页数值 */
-            /* 行2: X=十字阶段(0~2) H=环状态(0~3) F=出环冷却中 V=竖置场强 */
-            OLED_ShowNum(2, 2,  (uint32_t)Cross_Stage, 1);
-            OLED_ShowNum(2, 5,  (uint32_t)HexDia_Flag, 1);
-            OLED_ShowNum(2, 8,  (uint32_t)(HexDia_Cool > 0), 1);
-            OLED_ShowNum(2, 11, (uint16_t)ADC_V_StrengthF, 2);
-            /* 行3: 横/竖巡航基线 + 编码器航向(度) */
-            OLED_ShowNum(3, 3,  (uint32_t)H_Base, 2);
-            OLED_ShowNum(3, 8,  (uint32_t)V_Base, 2);
-            OLED_ShowSignedNum(3, 12, (int32_t)Yaw_Deg, 3);
-            /* 行4: S=赛道状态 C=十字计数 tH=环内计时 */
-            OLED_ShowNum(4, 2,  (uint32_t)Track_State, 1);
-            OLED_ShowNum(4, 5,  Menu_CrossCount, 2);
-            OLED_ShowNum(4, 10, (uint32_t)HexDia_Timer, 3);
+        case 6: /* 推车监视数据(只跑识别, 不输出电机): 四个元素计数 + 实时误差 */
+            OLED_ShowString(1, 1, Menu_DetectMonitor ?
+                            "MON:ON  K3:STOP " : "MON:OFF K3:START");
+            OLED_ShowNum(2, 3, (uint32_t)Menu_CurveCount, 3);
+            OLED_ShowNum(2, 9, (uint32_t)Menu_CrossCount, 3);
+            OLED_ShowNum(3, 3, (uint32_t)Menu_RingCount, 3);
+            OLED_ShowNum(3, 9, (uint32_t)Menu_SharpCount, 3);
+            OLED_ShowSignedNum(4, 3, (int32_t)Error_H, 4);
+            OLED_ShowSignedNum(4, 10, (int32_t)Yaw_Deg, 4);
             break;
     }
 }
@@ -424,7 +451,11 @@ static char *Menu_RunStateCode(void)
 static char *Menu_RunTurnCode(void)
 {
     if (Track_Straight || Cross_Stage != 0) return "F";
-    if (Curve_Turn_Now) return (Speed_Delta > 0) ? "R" : "L";
+    if (Curve_Turn_Now)
+    {
+        if (Curve_Turn_Dir > 0) return "R";
+        if (Curve_Turn_Dir < 0) return "L";
+    }
     if (Speed_Delta > 40) return "R";
     if (Speed_Delta < -40) return "L";
     return "F";

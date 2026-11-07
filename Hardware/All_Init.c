@@ -2,6 +2,9 @@
 
 void All_Init(void)
 {
+    /* 上电默认走自动标定(菜单第 2 页显示 M1, KEY4 可切回固定值) */
+    ADC_AutoCalib = Menu_CalibMode;
+
     /* 电感标定值默认(需实际标定后修改)
      *
      * 复合布局标定要点:

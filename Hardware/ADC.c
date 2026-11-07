@@ -53,9 +53,18 @@ float C = 0.0f;
  *  弯道降速和状态分类都会更早响应。
  *  注意: 直道上竖置接近 0 且被 V_ACT_MIN 旁路, 这个权重不影响直线。
  * ------------------------------------------------------------ */
-/* 中右竖置通道硬件增益偏大(比 ML 高约 25%), 软件把它的归一化读数压到 80%,
- * 使左右竖置在同一个弯里对称反应。改这里不用动电位器。 */
-#define MR_GAIN_SCALE  0.80f
+/* 中右竖置通道硬件增益偏大且无法调节, 控制与显示统一按实际值的 75% 使用。 */
+#define MR_GAIN_SCALE  0.75f
+
+/* 直道零点自适应: 消除左右横置的安装/增益不对称(车一直往一边偏的根因)。
+ * 只在"竖置 <500(直道) + 横置有信号 + 误差本身很小"时学习,
+ * 弯道上误差大, 不学习, 所以不会把真实转向吃掉。 */
+#define ZERO_LEARN       0.0015f  /* 每 5ms 学习 0.15%, 约 3 秒收敛(太快会掩盖真实偏差) */
+#define ZERO_GATE        5.0f     /* 只学习 ±5 以内: 更大的偏差是车真的偏了, 必须由 PD 修 */
+#define ZERO_LIMIT       8.0f     /* 最多补偿 ±8, 防止把真实位置偏差当成零点学掉 */
+
+volatile float ADC_Zero_H = 0.0f;   /* 横置零点(百分数) */
+volatile float ADC_Raw_MR = 0.0f;   /* MR 原始值 ×0.75 */
 
 #define W_OUT 4.0f
 #define W_IN  1.5f
@@ -63,10 +72,13 @@ float C = 0.0f;
 /* 误差一阶低通系数(0~1), 越大越灵敏但越抖 */
 #define ERROR_LPF 0.5f
 
-/* 各类型参与误差运算的最低总电平(归一化值之和)。
- * 低于门限的那一类直接旁路, 避免"几 LSB 噪声 = 满量程误差"。 */
-#define H_ACT_MIN   4.0f    /* 横置 (L+R): 低于此视为丢线, 误差交给丢线保护 */
-#define V_ACT_MIN   30.0f   /* 竖置 (ML+MR): 直道上通常 << 30, 自动不参与 */
+/* 各类型参与误差运算的最低门限。
+ * 对于竖置，现场实测中间两路在直道上通常只有几十到几百 ADC,
+ * 低于 500 时就不再视为弯道特征，避免直道被误判成急弯。
+ * 这里作为“直道误差旁路门限”，不直接抹掉它被判定弯道/十字的能力。 */
+#define H_ACT_MIN      4.0f    /* 横置 (L+R): 低于此视为丢线, 误差交给丢线保护 */
+#define V_RAW_IGNORE  500.0f    /* 中间两个竖置在 500 以下时不参与直道误差 */
+#define V_ACT_MIN     18.0f    /* 竖置归一化和低于此 -> 直接不参与 */
 
 /* 硬件峰值上限: 电位器调好后十字/环岛处的峰值应落在 3200~3550,
  * 超过 3700 必须逆时针降增益, 绝对不能顶到 4095(饱和后完全失去区分度)。
@@ -228,18 +240,30 @@ static float ADC_NormF(int16_t index)
 
 void Get_Error(void)
 {
-    float eh, ev, num, den, hsum, vsum;
+    float lr, rr, ml, mr, hsum_r, vsum_r;
+    float eh, ev, num, den;
 
     /* 引脚映射(依据原理图):
      * PA7=ADC1=左横置(L)    -> ADC_Value[3]
      * PA6=ADC2=中左竖置(ML) -> ADC_Value[2]
-     * PA5=ADC3=中右竖置(MR) -> ADC_Value[1]
+     * PA5=ADC3=中右竖置(MR) -> ADC_Value[1]   (硬件增益偏大, 统一 ×0.75)
      * PA4=ADC4=右横置(R)    -> ADC_Value[0]
      */
+    /* 先减各通道最小值再算差比和: 这样电感离导线变远(整体电平等比变小)时,
+     * 误差百分比不变; 直接用原始值会被"非零最小值"拉偏(近处 57%、远处 42%)。 */
+    lr = (float)ADC_Value[3] - (float)ADC_MIN[3];
+    ml = (float)ADC_Value[2] - (float)ADC_MIN[2];
+    mr = ((float)ADC_Value[1] - (float)ADC_MIN[1]) * MR_GAIN_SCALE;
+    rr = (float)ADC_Value[0] - (float)ADC_MIN[0];
+    if (lr < 0.0f) lr = 0.0f;
+    if (ml < 0.0f) ml = 0.0f;
+    if (mr < 0.0f) mr = 0.0f;
+    if (rr < 0.0f) rr = 0.0f;
+    ADC_Raw_MR = mr;
+
+    /* 归一化值只用于显示和场强判断 */
     ADC_Lf  = ADC_NormF(3);
     ADC_MLf = ADC_NormF(2);
-    /* MR 硬件放大倍数比 ML 大(电位器/电路不一致, 调不动), 软件补 80%,
-     * 否则左 45° 弯里 MR 先于 ML 起来, 等 ML 反超时转弯已经晚了。 */
     ADC_MRf = ADC_NormF(1) * MR_GAIN_SCALE;
     if (ADC_MRf > 100.0f) ADC_MRf = 100.0f;
     ADC_Rf  = ADC_NormF(0);
@@ -249,14 +273,8 @@ void Get_Error(void)
     ADC_MR = (int16_t)ADC_MRf;
     ADC_R  = (int16_t)ADC_Rf;
 
-    /* ------------------------------------------------------------
-     *  场强: 横竖分开统计。
-     *  横置在直道上就有很大读数, 竖置接近 0 -> 两者相加没有物理意义,
-     *  必须分开给判据用(见 Ring_Judge.c)。
-     * ------------------------------------------------------------ */
     ADC_H_StrengthF = (ADC_Lf + ADC_Rf) * 0.5f;
     ADC_V_StrengthF = (ADC_MLf + ADC_MRf) * 0.5f;
-    /* 综合场强按布局权重合成, 只用于"整条线还在不在"的粗判 */
     ADC_StrengthF = (W_OUT * ADC_H_StrengthF + W_IN * ADC_V_StrengthF) / (W_OUT + W_IN);
     ADC_Strength = (uint8_t)(ADC_StrengthF + 0.5f);
     ADC_Online = (ADC_Strength >= TRACK_ONLINE_TH) ? 1 : 0;
@@ -264,55 +282,53 @@ void Get_Error(void)
     Error_Last = Error;
 
     /* ------------------------------------------------------------
-     *  差比和误差(80/20 加权)
+     *  误差改用【原始值差比和】, 不再用归一化值
      *
-     *  关键: 【横置与竖置各自先归一化, 再按 80/20 加权合成】
-     *
-     *    横置误差 eh = (L - R) / (L + R)        ∈ [-1, 1]
-     *    竖置误差 ev = (ML - MR) / (ML + MR)    ∈ [-1, 1]
-     *
-     *    Error = (A*W_OUT*eh + B*W_IN*ev) / (A*W_OUT + B*W_IN) * 100
-     *
-     *  为什么不能直接把四路塞进一个分子/分母:
-     *    · 竖置在直道上接近 0, 塞进去只会把分母冲淡、把误差压小;
-     *    · 到十字/环岛竖置猛升, 又会让误差被竖置项绑架而满舵。
-     *    先各自归一化后, "横置全丢、只剩竖置"时 eh=0 而不是被放大,
-     *    这正是"两者不互比"在算法上的落地。
-     *
-     *  与四路全横置旧版的差别:
-     *    旧版权重 3:1 是把四路当成等间距横置阵列(几何重心), 复合布局下
-     *    中间两路是竖置的, 不参与重心计算, 所以权重改为 横 80% / 竖 20%。
+     *  为什么: 归一化是 (V-MIN)/(MAX-MIN), MAX 一旦标在直道读数上,
+     *  直道就顶到 100; 左右两路都 100 -> 误差恒 0。现场表现就是
+     *  "离得很近也显示 0、直道一直往一边偏、直角弯看不见"。
+     *  差比和与绝对增益无关: 2800/2800 -> 0, 3000/2500 -> 9, 永远有分辨率。
      * ------------------------------------------------------------ */
-    hsum = ADC_Lf + ADC_Rf;
-    vsum = ADC_MLf + ADC_MRf;
+    hsum_r = lr + rr;
+    vsum_r = ml + mr;
 
-    /* 有效门限: 某类型总电平太低时, 它的"误差"只是几 LSB 的噪声被放大成
-     * 满量程, 必须旁路掉, 否则直道上竖置会来回打舵。
-     *   H_ACT_MIN: 横置太低说明已丢线, 交给丢线保护, 这里不再输出误差
-     *   V_ACT_MIN: 竖置平时只有个位数, 达不到此门限就不参与运算
-     */
-    if (hsum >= H_ACT_MIN) eh = (ADC_Lf - ADC_Rf) / hsum;
-    else                   eh = 0.0f;
+    if (hsum_r > 50.0f) eh = (lr - rr) / hsum_r * 100.0f;
+    else               eh = 0.0f;
 
-    if (vsum >= V_ACT_MIN) ev = (ADC_MLf - ADC_MRf) / vsum;
-    else                   ev = 0.0f;
+    /* 直道零点: 只在中间两路 <500(直道)且横置有信号时学习 */
+    if ((vsum_r < V_RAW_IGNORE) && (hsum_r > 800.0f) && (fabsf(eh) < ZERO_GATE))
+    {
+        ADC_Zero_H += (eh - ADC_Zero_H) * ZERO_LEARN;
+    }
+    if (ADC_Zero_H >  ZERO_LIMIT) ADC_Zero_H =  ZERO_LIMIT;
+    if (ADC_Zero_H < -ZERO_LIMIT) ADC_Zero_H = -ZERO_LIMIT;
+    eh -= ADC_Zero_H;
+
+    /* 中间两个竖置原始值 <500 时不参与(直道上本来就没信号, 不拿噪声打方向) */
+    if (vsum_r >= V_RAW_IGNORE) ev = (ml - mr) / vsum_r * 100.0f;
+    else                        ev = 0.0f;
+
+    if (eh >  100.0f) eh =  100.0f;
+    if (eh < -100.0f) eh = -100.0f;
+    if (ev >  100.0f) ev =  100.0f;
+    if (ev < -100.0f) ev = -100.0f;
 
     num = A * W_OUT * eh + B * W_IN * ev;
     den = A * W_OUT + B * W_IN;
     if (den < 0.001f) den = 1.0f;
 
-    Error_Raw = num / den * 100.0f;
-    if (Error_Raw > 100.0f)  Error_Raw = 100.0f;
-    else if (Error_Raw < -100.0f) Error_Raw = -100.0f;
-
-    /* 一阶低通: 抑制量化抖动, 同时保留响应速度 */
+    Error_Raw = num / den;
     Error = Error + (Error_Raw - Error) * ERROR_LPF;
 
-    /* 两路独立误差(各自限幅 + 低通), 给双 PID 用 */
-    if (eh >  1.0f) eh =  1.0f;  else if (eh < -1.0f) eh = -1.0f;
-    if (ev >  1.0f) ev =  1.0f;  else if (ev < -1.0f) ev = -1.0f;
-    Error_H = Error_H + (eh * 100.0f - Error_H) * ERROR_LPF;
-    Error_V = Error_V + (ev * 100.0f - Error_V) * ERROR_LPF;
+    /* 两路独立误差, 已限幅在 ±100 */
+    Error_H = Error_H + (eh - Error_H) * ERROR_LPF;
+    Error_V = Error_V + (ev - Error_V) * ERROR_LPF;
+}
+
+/* 重新开始学习直道零点(发车/进入推车监视时调用) */
+void ADC_Zero_Reset(void)
+{
+    ADC_Zero_H = 0.0f;
 }
 
 /* ============================================================
@@ -348,7 +364,11 @@ void ADC_Calibrate(void)
         if (Calib_State == 1)
         {
             if (ADC_Value[i] > ADC_MAX[i]) ADC_MAX[i] = ADC_Value[i];
-            if (ADC_Value[i] < ADC_MIN[i] || ADC_MIN[i] == 0) ADC_MIN[i] = ADC_Value[i];
+            /* 注意: 不能再用 "|| ADC_MIN[i]==0" 把第一拍读数当最小值。
+             * 若第一拍车正好在导线附近(2800), MIN 就永远卡在 2800,
+             * 之后直道仍是 2800 -> 归一化恒 0, 屏幕"离得近也显示 0"、
+             * 直道往一边偏、直角弯看不见, 全是这一行造成的。 */
+            if (ADC_Value[i] < ADC_MIN[i]) ADC_MIN[i] = ADC_Value[i];
             /* 防呆: 量程至少 200。否则分母趋 0, 归一化会被拉到满量程 */
             if (ADC_MAX[i] < ADC_MIN[i] + 200) ADC_MAX[i] = ADC_MIN[i] + 200;
         }
@@ -368,7 +388,9 @@ void ADC_Calibrate(void)
             }
             else
             {
-                ADC_MIN[i] = ADC_MIN[i] + (uint16_t)((ADC_Value[i] - ADC_MIN[i]) / 64);
+                /* 回升放慢到 /512: 原来 /64 会把直道读数慢慢抬成最小值,
+                 * 归一化随之掉到 0("飘得很大"的另一半原因)。 */
+                ADC_MIN[i] = ADC_MIN[i] + (uint16_t)((ADC_Value[i] - ADC_MIN[i]) / 512);
             }
             if (ADC_MAX[i] <= ADC_MIN[i] + 10)
             {
@@ -400,8 +422,9 @@ void ADC_Calib_Reset(void)
     for (i = 0; i < 4; i++)
     {
         ADC_MAX[i] = 0;
-        ADC_MIN[i] = 0;
+        ADC_MIN[i] = 4095;      /* 必须是"最大值", 不能是 0: 从 0 开始会卡在第一个读数 */
     }
+    ADC_Zero_H = 0.0f;
     Calib_State = 1;        /* 开始采集, ADC_CALIB_MS 后自动锁定 */
     s_calib_ms  = 0;
     ADC_SatSeen = 0;

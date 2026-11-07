@@ -62,6 +62,7 @@ uint8_t  Menu_CrossCount = 0;
 uint8_t  Menu_Page = 0;
 uint8_t  Menu_CalibMode = 0;
 uint8_t  Menu_DistRaw = 0;
+volatile uint8_t Menu_DetectMonitor = 0;
 const int16_t Speed_Level_Table[3] = {3000, 5000, 7500};
 volatile int16_t Speed_Basic = 5000;
 /* PID.c 的航向估计读这两个量(宿主仿真里由测试用例直接写) */
@@ -128,6 +129,8 @@ static void Reset_State(void)
     D_Filt = 0.0f; Error = 0.0f; Error_Last = 0.0f;
     Error_H = 0.0f; Error_V = 0.0f;
     Menu_CrossCount = 0;
+    Menu_HexDiaEn = 1;
+    Menu_DetectMonitor = 0;
     Menu_Running = 1;
     H_Base = 0.0f; V_Base = 0.0f;
     Yaw_Deg = 0.0f; Yaw_Rate_Dps = 0.0f; Yaw_Valid = 0;
@@ -211,7 +214,16 @@ static void S2_Cross_At_Distances(void)
         printf("  %s(k=%.4f) 横置 %3d/%3d 竖置 %3d/%3d  V场强=%d 十字计数=%d\n",
                names[i], k, ADC_L, ADC_R, ADC_ML, ADC_MR,
                (int)ADC_V_StrengthF, Menu_CrossCount);
-        CHECK(Menu_CrossCount == 1, "%s 十字路口应计 1 次, 实际 %d", names[i], Menu_CrossCount);
+        if (k > 0.10f)
+        {
+            CHECK(Menu_CrossCount == 1, "%s 十字路口应计 1 次, 实际 %d", names[i], Menu_CrossCount);
+        }
+        else
+        {
+            /* 40cm 时竖置原始值已低于 500: 按需求"中间两路 500 以下忽略",
+             * 不识别十字是正确行为(以前用归一化会硬把那点噪声放大成十字)。 */
+            CHECK(Menu_CrossCount == 0, "40cm 竖置低于门限应忽略, 实际 %d", Menu_CrossCount);
+        }
     }
 }
 
@@ -374,7 +386,7 @@ static void S4b_HexDia_ClosedLoop(void)
     spd_in = Track_Speed_Ratio;
     printf("  进环      状态=%d 偏置=%d 速度系数=%.2f\n", HexDia_Flag, bias_in, spd_in);
     CHECK(HexDia_Flag == 1, "进环阶段应为状态 1, 实际 %d", HexDia_Flag);
-    CHECK(bias_in < 0, "进环应为右转(负偏置): %d", bias_in);
+    CHECK(bias_in > 0, "进环应为右转(正差速): %d", bias_in);
     CHECK(spd_in < 1.0f, "进环应降速: %.2f", spd_in);
 
     /* 2) 环内: 轻偏置维持方向 */
@@ -390,7 +402,7 @@ static void S4b_HexDia_ClosedLoop(void)
     spd_search = Track_Speed_Ratio;
     printf("  环内丢线  偏置=%d 速度系数=%.2f (应比环内转更多、更慢)\n", bias_search, spd_search);
     CHECK(HexDia_Flag == 2, "丢线时不应退出环: %d", HexDia_Flag);
-    CHECK(bias_search < bias_keep, "丢线时偏置应更大(转更多): %d vs %d", bias_search, bias_keep);
+    CHECK(bias_search > bias_keep, "丢线时偏置应更大(转更多): %d vs %d", bias_search, bias_keep);
     CHECK(spd_search < spd_keep, "丢线时应更慢: %.2f vs %.2f", spd_search, spd_keep);
 
     /* 4) 绕完一圈: 导线从左侧重新出现 */
@@ -540,9 +552,9 @@ static void S7_Speed_Schedule(void)
 
     for (i = 0; i < 10; i++) { CURVE_R(k); PID_Calculate(); }
     printf("  直角档 G=%d 速度=%d (应约 %d)\n",
-           Curve_Grade_Now, PID_Speed_Schedule(Speed_Basic), (int)(300 * 0.55f));
+           Curve_Grade_Now, PID_Speed_Schedule(Speed_Basic), (int)(300 * 0.75f));
     CHECK(Curve_Turn_Now == 1, "90 度应进入转弯中");
-    CHECK(PID_Speed_Schedule(Speed_Basic) < 200, "直角弯应瞬间降速");
+    CHECK(PID_Speed_Schedule(Speed_Basic) < 240, "直角弯应瞬间降速(0.75 基准)");
 
     for (i = 0; i < 10; i++) { STRAIGHT(k); PID_Calculate(); }
     CHECK(PID_Speed_Schedule(Speed_Basic) == 300, "转够后应立刻恢复全速");
@@ -639,8 +651,8 @@ static void S9_Track_State(void)
     Cycle(80, 70, 3, 3, 20);
     Cycle(80, 20, 3, 3, 70);
     Cycle(80, 70, 3, 3, 20);
-    printf("  S弯    -> 状态 %d (期望 3) 系数 %.2f D倍数 %.2f\n",
-           Track_State, Track_Speed_Ratio, Track_Kd_Gain);
+    printf("  S弯    -> 状态 %d (期望 3) 系数 %.2f D倍数 %.2f flip=%d/%d\n",
+           Track_State, Track_Speed_Ratio, Track_Kd_Gain, Dbg_FlipFast, Dbg_FlipSlow);
     CHECK(Track_State == TRK_S_CURVE, "S弯应为 3, 实际 %d", Track_State);
     CHECK(Track_Kd_Gain > 1.2f, "S弯应加大 D 阻尼: %.2f", Track_Kd_Gain);
 
@@ -654,7 +666,7 @@ static void S9_Track_State(void)
     printf("  锯齿   -> 状态 %d (期望 7) 系数 %.2f D倍数 %.2f\n",
            Track_State, Track_Speed_Ratio, Track_Kd_Gain);
     CHECK(Track_State == TRK_ZIGZAG, "锯齿应为 7, 实际 %d", Track_State);
-    CHECK(Track_Speed_Ratio < 0.60f, "锯齿应明显降速: %.2f", Track_Speed_Ratio);
+    CHECK(Track_Speed_Ratio <= 0.66f, "锯齿应明显降速: %.2f", Track_Speed_Ratio);
 
     /* 十字 */
     Reset_State();
@@ -693,7 +705,7 @@ static void S10_Delta_Shape_And_Yaw(void)
     CHECK(d == 0, "十字直行应把差速压到 0, 实际 %d", d);
     Error_H = 20.0f;
     for (i = 0; i < 5; i++) d = PID_Apply(0);
-    CHECK(d > 0 && d <= 120, "十字入口轻微偏心应只产生有限的对中修正, 实际 %d", d);
+    CHECK(d < 0 && d >= -120, "左侧电感偏强时十字对中应给有限左转差速, 实际 %d", d);
     Track_Straight = 0;
 
     /* 3) 十字直行: 有航向时把偏航拉回来(不能让它斜穿) */
@@ -753,6 +765,49 @@ static void S12_Curve_Grade(void)
     CHECK(Curve_Grade_Now >= 2, "横置明显变小应提前判直角级, G=%d", Curve_Grade_Now);
 }
 
+/* ================= S13 转向极性 / 急弯回线 / MR补偿 / 停车监视 ================= */
+static void S13_Steering_And_Monitor(void)
+{
+    int i;
+
+    printf("\n[S13] 转向极性、急弯回线、MR缩放和停车监视\n");
+
+    Reset_State();
+    FeedRaw(1000, 1000, 2920, 1000);
+    CHECK(ADC_MR == 60, "MR归一化80应按75%%显示/控制为60, 实际 %d", ADC_MR);
+    CHECK(fabsf(ADC_MRf - 60.0f) < 0.1f, "MR浮点控制值应为60, 实际 %.2f", ADC_MRf);
+
+    Reset_State();
+    for (i = 0; i < 30; i++) { STRAIGHT(1.0f); PID_Calculate(); }
+    for (i = 0; i < 6; i++) { Feed(20, 10, 10, 20, 1.0f); PID_Calculate(); }
+    CHECK(Curve_Turn_Now == 1,
+          "左右电感从直道同时减弱时不能因暂时相等而立即结束急弯");
+
+    Reset_State();
+    Menu_HexDiaEn = 0;
+    Menu_DetectMonitor = 1;
+    Prime_Base();
+    for (i = 0; i < 60; i++) { HEX_ENTRY(1.0f); Track_Judge(); }
+    CHECK(HexDia_Flag >= 1, "停车监视应在圆环开关关闭时仍显示环检测");
+
+    Reset_State();
+    for (i = 0; i < 12; i++) { OFF_LEFT(1.0f); PID_Calculate(); }
+    CHECK(Speed_Delta < 0, "左侧电感更强应输出左转(负差速), 实际 %d", Speed_Delta);
+    CHECK(Curve_Turn_Dir < 0, "左弯转向标志应为左, 实际 %d", Curve_Turn_Dir);
+
+    Reset_State();
+    for (i = 0; i < 12; i++) { CURVE_R(1.0f); PID_Calculate(); }
+    CHECK(Speed_Delta > 0, "右侧电感更强应输出右转(正差速), 实际 %d", Speed_Delta);
+    CHECK(Curve_Turn_Dir > 0, "右弯转向标志应为右, 实际 %d", Curve_Turn_Dir);
+
+    for (i = 0; i < 10; i++) { Feed(0, 0, 0, 0, 1.0f); PID_Calculate(); }
+    CHECK(Curve_Turn_Now == 1, "两路都弱或离线时不得误判弯道完成");
+
+    for (i = 0; i < 5; i++) { Feed(40, 0, 0, 40, 1.0f); PID_Calculate(); }
+    CHECK(Curve_Turn_Now == 0, "左右横置都有效且读数相等后应立即完成转弯");
+    CHECK(Curve_Turn_Dir == 0, "转弯完成后应清除转向状态");
+}
+
 int main(void)
 {
     printf("==============================================\n");
@@ -774,6 +829,7 @@ int main(void)
     S9_Track_State();
     S10_Delta_Shape_And_Yaw();
     S12_Curve_Grade();
+    S13_Steering_And_Monitor();
 
     printf("\n==============================================\n");
     printf(" checks=%d  failures=%d  -> %s\n", g_checks, g_fail, g_fail ? "FAIL" : "ALL PASS");

@@ -33,6 +33,17 @@ void Track_StateMachine_Reset(void);
 /* 横置/竖置各自的巡航基线(按类型各自比较, 不互比) */
 extern float H_Base;
 extern float V_Base;
+extern float H_Base_Raw;   /* 原始值基线(十字判据用) */
+extern float V_Base_Raw;
+
+/* 推车检测页计数 */
+extern volatile uint16_t Menu_CurveCount;
+extern volatile uint16_t Menu_SharpCount;
+extern volatile uint16_t Menu_RingCount;
+
+/* 调试: S弯/锯齿的反转计数 */
+extern volatile uint8_t Dbg_FlipFast;
+extern volatile uint8_t Dbg_FlipSlow;
 
 void Cross_Judge(void);
 void HexDia_Judge(void);

@@ -16,6 +16,13 @@ extern volatile float   Speed_KiS;
 extern volatile uint8_t Speed_Loop_En;  /* 0=开环(仅前馈) 1=闭环 */
 extern volatile uint8_t Speed_Fault;    /* 0=正常 1=测速失效已降级 2=编码器反接已纠正 */
 
+/* 转向极性(整车只改这一处):
+ *   代码内部约定: 差速 Δ > 0 = 左轮快 = 车应向右转
+ *   实测如果"该右转却左转 / 该左转却右转", 把这里改 -1
+ *   (左右电机接线互换、车头方向装反都会导致这种情况)
+ * 只翻转"转向差速", 不影响前进方向和直道等速补偿。 */
+#define STEER_SIGN   (-1.0f)
+
 void Motor_Init(void);
 void Motor_Out(int16_t L_Speed, int16_t R_Speed);
 void CarMotor_Control(void);

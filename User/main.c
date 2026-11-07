@@ -13,6 +13,13 @@ static void Debug_ShowSensor(uint8_t line, uint8_t value_column,
 {
     uint16_t value = ADC_Value[adc_index];
 
+    /* MR(PA5) 硬件放大倍数偏大且调不动, 显示统一按实际值的 75%,
+     * 和 ADC.c 里参与运算的 ADC_Raw_MR 保持一致, 屏幕才不会"看着偏很多"。 */
+    if (adc_index == 1)
+    {
+        value = (uint16_t)((uint32_t)value * 3u / 4u);
+    }
+
     OLED_ShowNum(line, value_column, value, 4);
 
     if (value < ADC_MIN[adc_index])
@@ -50,6 +57,14 @@ int main(void)
             }
             else if (Display_Mode == 1)
             {
+                if (Menu_DetectMonitor)
+                {
+                    Menu_DetectMonitor = 0;
+                    Track_StateMachine_Reset();
+                    Cross_Reset();
+                    HexDia_Reset();
+                    PID_Apply_Reset();
+                }
                 Display_Mode = 0;          /* 菜单 -> 调试页 */
                 Debug_Inited = 0;
             }
@@ -139,7 +154,7 @@ int main(void)
             Menu_RunDisplay();
         }
 
-        Delay_ms(50);
+        /* 主循环不再额外塞固定 50ms 延迟：OLED 由增量刷新和 5ms 中断控制保证实时性。 */
     }
 }
 
@@ -174,7 +189,7 @@ void TIM1_UP_IRQHandler(void)
         /* 3. 运行控制 */
         if (Menu_Running == 1)
         {
-            /* 车速固定 20% PWM: Speed_Basic 只承载"等效速度"(200 = 名义值),
+            /* 车速固定 30% PWM: Speed_Basic 只承载"等效速度"(200 = 名义值),
              * 弯道/丢线/急弯的降速由 PID_Speed_Schedule 在此基础上缩放。 */
             Speed_Basic = SPEED_NOMINAL_MMS;
 
@@ -204,8 +219,17 @@ void TIM1_UP_IRQHandler(void)
         }
         else
         {
-            /* 未发车 / 已按 KEY4 停车: 电机停止(顺带清速度环积分, 避免起步冲一下)。
-             * 这是现在【唯一】的停车路径 —— 没有圈数、没有自动停车。 */
+            if (Menu_DetectMonitor)
+            {
+                /* 停车推车监视: 运行识别状态机用于显示, 不经过电机控制路径。 */
+                Speed_Basic = SPEED_NOMINAL_MMS;
+                PID_LostLine_Check();
+                PID_Calculate();
+                Track_Judge();
+                Speed_Delta = PID_Apply(Speed_Delta);
+            }
+
+            /* 未发车 / 已按 KEY4 停车: 电机始终关闭。 */
             Motor_Out(0, 0);
             Speed_Loop_Reset();
         }

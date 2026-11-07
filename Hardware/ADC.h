@@ -18,6 +18,8 @@ extern volatile float ADC_Lf, ADC_MLf, ADC_MRf, ADC_Rf;
 extern volatile float Error, Error_Last, Error_Raw;
 extern volatile float Error_H;   /* 横置(L/R)独立误差: 直道 PID 输入 */
 extern volatile float Error_V;   /* 竖置(ML/MR)独立误差: 弯道 PID 输入 */
+extern volatile float ADC_Zero_H; /* 直道零点(安装/增益不对称补偿) */
+extern volatile float ADC_Raw_MR; /* MR 原始值按硬件 75% 修正后的值 */
 extern uint16_t ADC_MAX[4], ADC_MIN[4];
 extern float A, B, C;
 
@@ -45,5 +47,6 @@ void Get_Error(void);
 void ADC_Calibrate(void);
 void ADC_Calib_Reset(void);
 void ADC_Peak_Reset(void);
+void ADC_Zero_Reset(void);
 
 #endif

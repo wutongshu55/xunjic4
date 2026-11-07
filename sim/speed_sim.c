@@ -48,6 +48,7 @@ uint8_t        Menu_SpdMode    = 0;                  /* 0=CL 闭环 */
 uint8_t        Menu_SpeedLevel = 1;
 /* 急弯 / 赛道元素: Motor.c 会读, 本仿真不链 PID.c/Ring_Judge.c, 给桩 */
 volatile uint8_t Curve_Turn_Now = 0;
+volatile int8_t Curve_Turn_Dir = 0;
 volatile uint8_t Curve_Grade_Now = 0;
 volatile uint8_t Curve_Conf_Now = 0;
 volatile uint8_t Curve_Wrong_Now = 0;
@@ -266,12 +267,12 @@ int main(void)
     CHECK(fabsf(s_v - 300.0f) <= 40.0f, "纠正后应闭环到 300, 实际 %.1f", s_v);
     CHECK(peak <= 300.0f * 1.8f,       "纠正过程不应冲到满速: 峰值 %.1f", peak);
 
-    /* ---- 9. 固定 20% PWM: 纯占空比, 完全不用编码器(现在的唯一车速) ---- */
-    printf("\n[9] 固定 20%% PWM(纯占空比), 编码器仍然断线\n");
+    /* ---- 9. 固定 30% PWM: 纯占空比, 完全不用编码器(现在的唯一车速) ---- */
+    printf("\n[9] 固定 30%% PWM(纯占空比), 编码器仍然断线\n");
     Reset_Plant();
     s_enc_mode     = 1;                 /* 编码器继续坏着 */
     Menu_SpdMode   = 2;
-    Speed_Basic    = SPEED_NOMINAL_MMS; /* 名义值: 直道不降速 -> 20% */
+    Speed_Basic    = SPEED_NOMINAL_MMS; /* 名义值: 直道不降速 -> 30% */
     Run(1500, &peak);
     printf("  占空比 %d (应 = %d), 实际 %.1f mm/s\n", s_duty_a, PWM_BASE_DUTY, s_v);
     CHECK(s_duty_a == PWM_BASE_DUTY, "PWM 固定基准应输出 %d, 实际 %d", PWM_BASE_DUTY, s_duty_a);
@@ -290,9 +291,46 @@ int main(void)
     Speed_Delta = 400;
     Run(60, NULL);
     printf("  左 %d / 右 %d\n", s_duty_a, s_duty_b);
-    CHECK(s_duty_a - s_duty_b == 800, "PWM 档差速应为 ±400: 左 %d 右 %d", s_duty_a, s_duty_b);
+    CHECK(s_duty_a - s_duty_b == 800.0f * STEER_SIGN,
+          "PWM 档差速应为 ±400(随 STEER_SIGN): 左 %d 右 %d", s_duty_a, s_duty_b);
     Speed_Delta = 0;
     Error_H = 0.0f;
+
+    /* 急弯内轮停转: 转向方向明确决定内侧轮, 外轮维持降速基准。 */
+    printf("\n[10] 急弯: 内轮停转、外轮维持降速基准\n");
+    Curve_Turn_Now = 1;
+    Curve_Grade_Now = 2;
+    HexDia_Flag = 0;
+    Track_Straight = 0;
+    Lost_State = 0;
+    Speed_Basic = (int16_t)(SPEED_NOMINAL_MMS * 0.60f);
+    Curve_Turn_Dir = 1;
+    CarMotor_Control();
+    if (STEER_SIGN > 0.0f)
+    {
+        CHECK(s_duty_a == (int16_t)(PWM_BASE_DUTY * 0.60f) && s_duty_b == 0,
+              "右转应停右内轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+    }
+    else
+    {
+        CHECK(s_duty_a == 0 && s_duty_b == (int16_t)(PWM_BASE_DUTY * 0.60f),
+              "STEER_SIGN=-1 时右转应停左轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+    }
+    Curve_Turn_Dir = -1;
+    CarMotor_Control();
+    if (STEER_SIGN > 0.0f)
+    {
+        CHECK(s_duty_a == 0 && s_duty_b == (int16_t)(PWM_BASE_DUTY * 0.60f),
+              "左转应停左内轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+    }
+    else
+    {
+        CHECK(s_duty_a == (int16_t)(PWM_BASE_DUTY * 0.60f) && s_duty_b == 0,
+              "STEER_SIGN=-1 时左转应停右轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+    }
+    Curve_Turn_Now = 0;
+    Curve_Grade_Now = 0;
+    Curve_Turn_Dir = 0;
 
     /* ---- 11. 直道等速补偿: 右轮快 -> 压右轮、补左轮 ---- */
     printf("\n[11] 直道等速补偿(编码器)\n");
