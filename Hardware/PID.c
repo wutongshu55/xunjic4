@@ -161,26 +161,37 @@ void PID_Yaw_Update(void)
  *    误差反向且够大 -> 转过了, 立刻结束, 交还 PD 反向拉回。
  *  不使用固定时间、固定角度、固定前瞻段, 所以不会"转晚了/转过头回不来"。
  * ============================================================ */
-#define CURVE_45_MIN     22.0f   /* >22 = 45° 级弯(轻弯) */
-#define CURVE_90_MIN     47.0f   /* >47 = 90° 级弯(现场调过, 更早识别直角) */
+#define CURVE_45_MIN     18.0f   /* >18 = 45° 级弯(更早介入小弯) */
+#define CURVE_90_MIN     43.0f   /* >43 = 90° 级弯(再提前一点识别直角) */
 #define CURVE_110_MIN    80.0f   /* >80 = 110° 级弯(最急) */
 #define CURVE_CONFIRM    2       /* 同方向连续 2 周期(10ms)就确认, 更快进弯 */
+#define CURVE_V_LOOKAHEAD 25.0f  /* 竖置抬头到此值: 前方有弯, 至少按 45° 级 */
 #define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限 */
 #define DELTA_CAP_45     600     /* 45° 允许的差速上限 */
 #define DELTA_CAP_90     950     /* 90° 允许的差速上限 */
 #define DELTA_CAP_110    900     /* 110° 允许的差速上限(与 DELTA_MAX 一致) */
 #define STRAIGHT_DEADZONE 3.0f   /* 直道 ±3 误差死区: 只滤噪声, 超过照常实时纠正 */
 
-/* 转弯过程: 起步柔和 -> 逐渐加力 -> 转够/转错立刻收(无任何保持) */
+/* 左右横置【逐渐变小】= 导线正在离开两侧横置电感 = 进弯前兆。
+ * 两级: 刚开始变小(85%)就先按轻弯介入; 明显变小(65%)直接判直角级。
+ * 这样不用等误差爬到 43、也不用等竖置完全抬头, 车就开始转。 */
+#define TURN_LR_SOFT_RATE 0.85f  /* 横置和降到基线的 85% -> 至少 45° 级 */
+#define TURN_LR_DROP_RATE 0.65f  /* 降到 65% -> 直接按 90° 级并进入转弯 */
+#define TURN_LR_DROP_MIN  45.0f  /* 基线本身要够强才启用(丢线时基线也低, 不会误触发) */
+#define TURN_LR_HMIN      8.0f   /* 当前横置和低于此值视为丢线, 不参与判定 */
+
+/* 转弯过程: 起步柔和 -> 逐渐加力 -> 转够了/确实转错才收 */
 #define TURN_DONE_ERR    12.0f   /* 误差回落到这个以下 = 基本转够了 */
 #define TURN_DONE_BAL    12.0f   /* 转弯中 |L-R| 归一化小于此 = 左右电感已一样 -> 停 */
 #define TURN_DONE_LR_MIN 18.0f   /* 且两路都要在线, 避免"都没压到线"被当成平衡 */
 #define TURN_DONE_CNT    3       /* 连续 3 周期(15ms)确认才收油 */
+#define TURN_MIN_TURN_TICK 8     /* 至少转 40ms 才允许"转够"退出, 防刚拐就停 */
 #define TURN_BIAS_K      4.0f    /* 转弯中按剩余误差补一点方向 */
 #define TURN_BIAS_MAX    300
 #define TURN_RAMP_TICK   10      /* 前 50ms 从 60% 力渐进到 100%: 一点一点转 */
 #define TURN_WRONG_ERR   26.0f   /* 转弯中误差反向且超过此值 -> 可能转错 */
 #define TURN_WRONG_CNT   3       /* 连续 3 拍 -> 判定转错, 立刻结束 */
+#define TURN_WRONG_MIN_TICK 60   /* 转过约 300ms(≈90°)之前, 不许判"转错"打断 */
 #define TURN_BLOCK_TICK  24      /* 转错后 120ms 内不再进弯, 让 PD 反向拉回 */
 #define TURN_MAX_TICK    400     /* 2s 保险, 防误判卡死 */
 
@@ -193,6 +204,7 @@ volatile uint8_t Curve_Wrong_Now = 0;   /* 1=刚判定转错(封锁期) */
 static uint8_t  s_curve_cnt   = 0;
 static uint8_t  s_curve_grade = 0;
 static int8_t   s_curve_sign  = 0;
+static float    s_hsum_base   = 0.0f;   /* 横置 L+R 的慢速基线(判骤降用) */
 static uint8_t  s_turn_active = 0;
 static uint8_t  s_turn_done   = 0;
 static uint8_t  s_turn_wrong  = 0;
@@ -205,6 +217,7 @@ void PID_Curve_Reset(void)
     s_curve_cnt   = 0;
     s_curve_grade = 0;
     s_curve_sign  = 0;
+    s_hsum_base   = 0.0f;
     s_turn_active = 0;
     s_turn_done   = 0;
     s_turn_wrong  = 0;
@@ -217,13 +230,51 @@ void PID_Curve_Reset(void)
 /* 每 5ms 调用一次。没有"保持/延迟": 每拍都按当前误差重判。 */
 static void Curve_Update(float eh)
 {
-    float   a  = fabsf(eh);
-    int8_t  sg = (eh > 1.0f) ? 1 : ((eh < -1.0f) ? -1 : 0);
-    uint8_t g  = 0;
+    float   a     = fabsf(eh);
+    float   hsum  = ADC_Lf + ADC_Rf;
+    float   ratio = 1.0f;
+    int8_t  sg    = (eh > 1.0f) ? 1 : ((eh < -1.0f) ? -1 : 0);
+    uint8_t g     = 0;
+    uint8_t soft  = 0;
+    uint8_t drop  = 0;
 
     if      (a >= CURVE_110_MIN) g = 3;
     else if (a >= CURVE_90_MIN)  g = 2;
     else if (a >= CURVE_45_MIN)  g = 1;
+
+    /* 竖置抬头 = 前方有弯: 误差还没到 45° 门限也先按轻弯处理, 早一点介入 */
+    if ((g == 0) && (fabsf(Error_V) >= CURVE_V_LOOKAHEAD)) g = 1;
+
+    /* 横置 L+R 基线: 只在"确实在直线上"时慢跟随。
+     * 进弯过程不更新, 否则基线被弯道本身拉低, 就看不出"逐渐变小"了。 */
+    if (s_hsum_base < 1.0f)
+    {
+        s_hsum_base = hsum;
+    }
+    else if (!s_turn_active && (fabsf(eh) < 12.0f) && (hsum >= s_hsum_base * 0.90f))
+    {
+        s_hsum_base += (hsum - s_hsum_base) * 0.05f;
+    }
+
+    /* 左右横置逐渐变小 = 导线正在离开两侧横置电感 = 进弯前兆(两级) */
+    if (s_hsum_base > TURN_LR_DROP_MIN)
+    {
+        ratio = hsum / s_hsum_base;
+        if (!s_turn_active && (hsum > TURN_LR_HMIN) && !Lost_State)
+        {
+            if (ratio < TURN_LR_SOFT_RATE) soft = 1;   /* 刚开始变小: 先按轻弯介入 */
+            if (ratio < TURN_LR_DROP_RATE) drop = 1;   /* 明显变小: 直接直角级 */
+        }
+    }
+
+    if (soft && (g == 0)) g = 1;
+    if (drop && (g < 2))  g = 2;
+
+    /* 误差恰好为 0(横竖抵消)时, 用竖置/最后方向补一个方向, 否则无法确认 */
+    if ((soft || drop) && (sg == 0))
+    {
+        sg = (fabsf(Error_V) > 5.0f) ? ((Error_V > 0.0f) ? 1 : -1) : Last_Dir;
+    }
 
     if ((g > 0) && (sg != 0))
     {
@@ -250,8 +301,23 @@ static void Curve_Update(float eh)
         s_curve_sign = 0;
     }
 
-    /* 分级直接跟当前误差走, 不做粘性保持 */
-    s_curve_grade = (s_curve_cnt >= CURVE_CONFIRM) ? g : 0;
+    /* 横置明显变小: 直接确认成 90° 级, 不等误差爬到 43 */
+    if (drop)
+    {
+        s_curve_sign = sg;
+        s_curve_cnt  = CURVE_CONFIRM;
+    }
+
+    /* 分级跟当前误差/前兆走; 转弯进行中至少保持 90° 档,
+     * 否则转弯途中误差回到 0 时面板 G 掉回 0、降速也会提前退出。 */
+    if (s_turn_active)
+    {
+        s_curve_grade = (g >= 2) ? g : 2;
+    }
+    else
+    {
+        s_curve_grade = (s_curve_cnt >= CURVE_CONFIRM) ? ((g > 0) ? g : 2) : 0;
+    }
 
     /* 直角/大弯: 确认后立刻进入"转弯中"(瞬间降速在 Speed_Schedule 里做) */
     if ((s_curve_grade >= 2) && !s_turn_active && (s_turn_block == 0))
@@ -277,7 +343,9 @@ static void Curve_Update(float eh)
 
         if (s_turn_tick < 60000) s_turn_tick++;
 
-        if ((a < TURN_DONE_ERR) || lr_bal)
+        /* 至少先转 40ms 才允许"转够"退出, 否则入口误差瞬时变小会让车刚拐就停 */
+        if (((a < TURN_DONE_ERR) || lr_bal) &&
+            (s_turn_tick >= TURN_MIN_TURN_TICK))
         {
             if (s_turn_done < 250) s_turn_done++;
         }
@@ -288,7 +356,8 @@ static void Curve_Update(float eh)
 
         /* ---- 转错保护: 误差反向够大, 且【还没】回中 ----
          * 已回中(lr_bal)的反向属于"下一个锯齿弯", 不算转错。 */
-        if ((sg != 0) && (sg != s_turn_dir) && (a > TURN_WRONG_ERR) && !lr_bal)
+        if ((s_turn_tick >= TURN_WRONG_MIN_TICK) &&
+            (sg != 0) && (sg != s_turn_dir) && (a > TURN_WRONG_ERR) && !lr_bal)
         {
             if (s_turn_wrong < 250) s_turn_wrong++;
         }
@@ -461,9 +530,19 @@ void PID_LostLine_Check(void)
 {
     float hsum = ADC_Lf + ADC_Rf;   /* 横置两路之和: 真正代表"还压不压得住线" */
 
-    if (fabsf(Error) > 11.0f)
+    /* 记住"最后该往哪边拐", 优先级: 横置误差 > 竖置误差 > 哪边电感更强。
+     * 合成 Error 可能被横竖抵消成 0, 只用它会在丢线后往错误方向找线。 */
+    if (fabsf(Error_H) > 6.0f)
     {
-        Last_Dir = (Error > 0.0f) ? 1 : -1;    /* 记住最后偏差方向 */
+        Last_Dir = (Error_H > 0.0f) ? 1 : -1;
+    }
+    else if (fabsf(Error_V) > 8.0f)
+    {
+        Last_Dir = (Error_V > 0.0f) ? 1 : -1;
+    }
+    else if (ADC_L != ADC_R)
+    {
+        Last_Dir = (ADC_L > ADC_R) ? 1 : -1;
     }
 
     /* 只认横置: 锯齿/直角中竖置抬头会让 ADC_Strength 很高,

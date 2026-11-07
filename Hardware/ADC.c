@@ -53,6 +53,10 @@ float C = 0.0f;
  *  弯道降速和状态分类都会更早响应。
  *  注意: 直道上竖置接近 0 且被 V_ACT_MIN 旁路, 这个权重不影响直线。
  * ------------------------------------------------------------ */
+/* 中右竖置通道硬件增益偏大(比 ML 高约 25%), 软件把它的归一化读数压到 80%,
+ * 使左右竖置在同一个弯里对称反应。改这里不用动电位器。 */
+#define MR_GAIN_SCALE  0.80f
+
 #define W_OUT 4.0f
 #define W_IN  1.5f
 
@@ -234,7 +238,10 @@ void Get_Error(void)
      */
     ADC_Lf  = ADC_NormF(3);
     ADC_MLf = ADC_NormF(2);
-    ADC_MRf = ADC_NormF(1);
+    /* MR 硬件放大倍数比 ML 大(电位器/电路不一致, 调不动), 软件补 80%,
+     * 否则左 45° 弯里 MR 先于 ML 起来, 等 ML 反超时转弯已经晚了。 */
+    ADC_MRf = ADC_NormF(1) * MR_GAIN_SCALE;
+    if (ADC_MRf > 100.0f) ADC_MRf = 100.0f;
     ADC_Rf  = ADC_NormF(0);
 
     ADC_L  = (int16_t)ADC_Lf;

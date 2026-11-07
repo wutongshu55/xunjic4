@@ -739,6 +739,18 @@ static void S12_Curve_Grade(void)
     printf("  回中: G=%d T=%d d=%d\n", Curve_Grade_Now, Curve_Turn_Now, Speed_Delta);
     CHECK(Curve_Turn_Now == 0, "误差回落应判定转够并收油");
     CHECK(abs(Speed_Delta) < 350, "回中后不该还有大差速, 实际 %d", Speed_Delta);
+
+    /* 4) 左右横置逐渐变小(导线离开两侧), 误差还没到 43 也要提前判直角 */
+    Reset_State();
+    for (i = 0; i < 30; i++) { STRAIGHT(1.0f); PID_Calculate(); }   /* 建立基线 */
+    for (i = 0; i < 6; i++)
+    {
+        Feed(20, 10, 10, 20, 1.0f);      /* L/R 同时变小, 误差仍接近 0 */
+        PID_Calculate();
+    }
+    printf("  横置渐降: G=%d T=%d |E|=%.1f L+R=%.0f\n",
+           Curve_Grade_Now, Curve_Turn_Now, fabsf(Error_H), ADC_Lf + ADC_Rf);
+    CHECK(Curve_Grade_Now >= 2, "横置明显变小应提前判直角级, G=%d", Curve_Grade_Now);
 }
 
 int main(void)
