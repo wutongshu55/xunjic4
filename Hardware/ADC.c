@@ -65,6 +65,8 @@ float C = 0.0f;
 
 volatile float ADC_Zero_H = 0.0f;   /* 横置零点(百分数) */
 volatile float ADC_Raw_MR = 0.0f;   /* MR 原始值 ×0.75 */
+static uint8_t  s_zero_lock = 0;    /* 1 = 零点已锁定(发车 3 秒后不再学) */
+static uint16_t s_zero_ms   = 0;
 
 #define W_OUT 4.0f
 #define W_IN  1.5f
@@ -295,10 +297,17 @@ void Get_Error(void)
     if (hsum_r > 50.0f) eh = (lr - rr) / hsum_r * 100.0f;
     else               eh = 0.0f;
 
-    /* 直道零点: 只在中间两路 <500(直道)且横置有信号时学习 */
-    if ((vsum_r < V_RAW_IGNORE) && (hsum_r > 800.0f) && (fabsf(eh) < ZERO_GATE))
+    /* 直道零点: 只在中间两路 <500(直道)且横置有信号时学习。
+     * 【只学发车后前 3 秒】: 长时间边跑边学, 车体轻微摆动会被慢慢学成零点,
+     * 跑久了反而出现"直道越跑越摆"; 3 秒足够收敛, 之后锁定不再变。 */
+    if (!s_zero_lock)
     {
-        ADC_Zero_H += (eh - ADC_Zero_H) * ZERO_LEARN;
+        if ((vsum_r < V_RAW_IGNORE) && (hsum_r > 800.0f) && (fabsf(eh) < ZERO_GATE))
+        {
+            ADC_Zero_H += (eh - ADC_Zero_H) * ZERO_LEARN;
+        }
+        if (s_zero_ms < 60000) s_zero_ms += 5;
+        if (s_zero_ms >= 3000) s_zero_lock = 1;
     }
     if (ADC_Zero_H >  ZERO_LIMIT) ADC_Zero_H =  ZERO_LIMIT;
     if (ADC_Zero_H < -ZERO_LIMIT) ADC_Zero_H = -ZERO_LIMIT;
@@ -328,7 +337,9 @@ void Get_Error(void)
 /* 重新开始学习直道零点(发车/进入推车监视时调用) */
 void ADC_Zero_Reset(void)
 {
-    ADC_Zero_H = 0.0f;
+    ADC_Zero_H  = 0.0f;
+    s_zero_lock = 0;      /* 发车重新开始 3 秒学习窗口 */
+    s_zero_ms   = 0;
 }
 
 /* ============================================================

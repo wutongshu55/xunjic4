@@ -296,38 +296,45 @@ int main(void)
     Speed_Delta = 0;
     Error_H = 0.0f;
 
-    /* 急弯内轮停转: 转向方向明确决定内侧轮, 外轮维持降速基准。 */
-    printf("\n[10] 急弯: 内轮停转、外轮维持降速基准\n");
+    /* 最急弯(110° 档): 内轮停转, 外轮固定 20% 占空比 */
+    printf("\n[10] 大弯: 内轮停转、外轮 20%% 基准\n");
     Curve_Turn_Now = 1;
-    Curve_Grade_Now = 2;
+    Curve_Grade_Now = 3;
     HexDia_Flag = 0;
     Track_Straight = 0;
     Lost_State = 0;
-    Speed_Basic = (int16_t)(SPEED_NOMINAL_MMS * 0.60f);
+    Speed_Delta = 0;
+    Speed_Basic = (int16_t)(SPEED_NOMINAL_MMS * 0.75f);
     Curve_Turn_Dir = 1;
     CarMotor_Control();
     if (STEER_SIGN > 0.0f)
     {
-        CHECK(s_duty_a == (int16_t)(PWM_BASE_DUTY * 0.60f) && s_duty_b == 0,
-              "右转应停右内轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+        CHECK(s_duty_a == TURN_ONE_WHEEL_DUTY && s_duty_b == 0,
+              "大弯右转应只留左轮 2000, 实际左/右=%d/%d", s_duty_a, s_duty_b);
     }
     else
     {
-        CHECK(s_duty_a == 0 && s_duty_b == (int16_t)(PWM_BASE_DUTY * 0.60f),
-              "STEER_SIGN=-1 时右转应停左轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+        CHECK(s_duty_a == 0 && s_duty_b == TURN_ONE_WHEEL_DUTY,
+              "STEER_SIGN=-1 时大弯右转应只留右轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
     }
     Curve_Turn_Dir = -1;
     CarMotor_Control();
     if (STEER_SIGN > 0.0f)
     {
-        CHECK(s_duty_a == 0 && s_duty_b == (int16_t)(PWM_BASE_DUTY * 0.60f),
-              "左转应停左内轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+        CHECK(s_duty_a == 0 && s_duty_b == TURN_ONE_WHEEL_DUTY,
+              "大弯左转应只留右轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
     }
     else
     {
-        CHECK(s_duty_a == (int16_t)(PWM_BASE_DUTY * 0.60f) && s_duty_b == 0,
-              "STEER_SIGN=-1 时左转应停右轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
+        CHECK(s_duty_a == TURN_ONE_WHEEL_DUTY && s_duty_b == 0,
+              "STEER_SIGN=-1 时大弯左转应只留左轮, 实际左/右=%d/%d", s_duty_a, s_duty_b);
     }
+
+    /* 90° 档: 必须用差速, 两个轮子都要转(单轮带不起来, 直道会摆) */
+    Curve_Grade_Now = 2;
+    Speed_Delta = 400;
+    CarMotor_Control();
+    CHECK(s_duty_a > 0 && s_duty_b > 0, "90° 档应走差速, 不能停一个轮子: 左/右=%d/%d", s_duty_a, s_duty_b);
     Curve_Turn_Now = 0;
     Curve_Grade_Now = 0;
     Curve_Turn_Dir = 0;

@@ -301,20 +301,21 @@ void CarMotor_Control(void)
         /* 90°/110° 弯按实时传感器闭环转向: 外轮保持弯道降速后的基准,
          * 内轮停转；传感器确认回线后立刻交回循迹，不用固定等待时间。
          * 环、十字、丢线搜索仍由各自状态机处理。 */
-        if (Curve_Turn_Now && (Curve_Grade_Now >= 2) &&
+        if (Curve_Turn_Now && (Curve_Grade_Now >= 3) &&
             (HexDia_Flag == 0) && !Track_Straight && !Lost_State)
         {
             float tdir = (float)Curve_Turn_Dir * STEER_SIGN;
+            float turn_duty = (float)TURN_ONE_WHEEL_DUTY;
 
             if (tdir > 0.0f)
             {
-                dl = base;
+                dl = turn_duty;
                 dr = 0.0f;
             }
             else if (tdir < 0.0f)
             {
                 dl = 0.0f;
-                dr = base;
+                dr = turn_duty;
             }
         }
 
@@ -341,20 +342,21 @@ void CarMotor_Control(void)
     tl    = (float)Speed_Basic + delta;
     tr    = (float)Speed_Basic - delta;
 
-    if (Curve_Turn_Now && (Curve_Grade_Now >= 2) &&
+    if (Curve_Turn_Now && (Curve_Grade_Now >= 3) &&
         (HexDia_Flag == 0) && !Track_Straight && !Lost_State)
     {
         float tdir = (float)Curve_Turn_Dir * STEER_SIGN;
+        float turn_mms = (float)TURN_ONE_WHEEL_DUTY / SPEED_FF_GAIN;
 
         if (tdir > 0.0f)
         {
-            tl = (float)Speed_Basic;
+            tl = turn_mms;
             tr = 0.0f;
         }
         else if (tdir < 0.0f)
         {
             tl = 0.0f;
-            tr = (float)Speed_Basic;
+            tr = turn_mms;
         }
     }
 
