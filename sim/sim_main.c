@@ -516,7 +516,7 @@ static void S5_Lost_Line(void)
             printf("  丢线后 场强=%d 丢线状态=%d 差速=%d (应沿最后方向找线)\n",
                    ADC_Strength, Lost_State, after);
             CHECK(Lost_State == 1, "全丢线应置丢线状态");
-            CHECK(after == 900 || after == -900, "丢线应按最后方向给固定找线差速: %d", after);
+            CHECK(after == 700 || after == -700, "丢线应按最后方向给固定找线差速: %d", after);
         }
         {
             int16_t slow = PID_Speed_Schedule(Speed_Basic);
@@ -681,8 +681,8 @@ static void S10_Delta_Shape_And_Yaw(void)
     printf("  满舵请求: 第一拍=%d (应 <=180)\n", d);
     CHECK(d > 0 && d <= 180, "差速应受斜率限制, 实际 %d", d);
     for (i = 0; i < 20; i++) d = PID_Apply(3000);
-    printf("  满舵请求: 稳态=%d (应 1000)\n", d);
-    CHECK(d == 1000, "稳态应被限幅到 1000, 实际 %d", d);
+    printf("  满舵请求: 稳态=%d (应 900)\n", d);
+    CHECK(d == 900, "稳态应被限幅到 900, 实际 %d", d);
 
     /* 2) 十字直行: 没有编码器航向时, 老实压成 0 */
     Reset_State();

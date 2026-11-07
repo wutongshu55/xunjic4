@@ -50,9 +50,9 @@ volatile int16_t Speed_Delta = 0;
 #define STRAIGHT_V_TH     20.0f   /* 横/竖误差都小于此值才算直道 */
 #define STRAIGHT_V_SCALE   0.60f  /* 直道时竖置融合权重打六折 */
 
-/* 差速总上限。35% 基准下 1000 ≈ 29% 差速, 内轮不会接近停转(不甩);
+/* 差速总上限。25% 基准(2500)下 900 ≈ 36% 差速, 够转但不甩;
  * 分档限幅见 DELTA_CAP_45/90/110, 那几个才是真正管"转弯幅度"的。 */
-#define DELTA_MAX        1000
+#define DELTA_MAX        900
 
 /* 差速斜率: 180 时 0 -> 1100 约 30ms, 路线一变立刻跟上;
  * 回落比上升更快, 转过头能迅速反向回中。 */
@@ -68,10 +68,13 @@ volatile int16_t Speed_Delta = 0;
  * 原 CURVE_TH1/2、Lag_Ratio、Lag_Cycles、LOOKAHEAD_MM、LAG_DISP_MAX、
  * SPEED_SCHEDULE_EN 都不再存在: 误差直接进 PD, 不做任何人为延迟或平滑保持。 */
 
-/* 丢线保护 */
-#define LOST_CONFIRM     8       /* 连续 8 周期(40ms)低场强才判丢线 */
+/* 丢线保护: 用【横置 L+R】判定, 比综合场强准 ——
+ * 锯齿/直角中竖置抬头会让 ADC_Strength 很高, 综合场强判不出丢线。 */
+#define LOST_CONFIRM     5       /* 连续 5 周期(25ms)横置都没信号才判丢线 */
+#define LOST_H_SUM_TH    16.0f   /* 横置归一化 L+R 低于此 = 丢线 */
 #define LOST_SPEED_RATIO 0.45f   /* 丢线时速度降到 45% */
-#define LOST_SEARCH_DELTA 900    /* 找线时的差速 */
+#define LOST_SEARCH_DELTA 700    /* 找线差速(比原来的 900 柔和, 不甩) */
+#define ZIG_SPEED_RATIO  0.75f   /* 连续锯齿弯: 略降速, 减少丢线 */
 uint8_t  Lost_State = 0;
 uint16_t Lost_Timer = 0;
 int8_t   Last_Dir = 1;
@@ -159,16 +162,19 @@ void PID_Yaw_Update(void)
  *  不使用固定时间、固定角度、固定前瞻段, 所以不会"转晚了/转过头回不来"。
  * ============================================================ */
 #define CURVE_45_MIN     22.0f   /* >22 = 45° 级弯(轻弯) */
-#define CURVE_90_MIN     47.0f   /* >55 = 90° 级弯 */
+#define CURVE_90_MIN     47.0f   /* >47 = 90° 级弯(现场调过, 更早识别直角) */
 #define CURVE_110_MIN    80.0f   /* >80 = 110° 级弯(最急) */
 #define CURVE_CONFIRM    2       /* 同方向连续 2 周期(10ms)就确认, 更快进弯 */
 #define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限 */
 #define DELTA_CAP_45     600     /* 45° 允许的差速上限 */
 #define DELTA_CAP_90     950     /* 90° 允许的差速上限 */
-#define DELTA_CAP_110    1000    /* 110° 允许的差速上限 */
+#define DELTA_CAP_110    900     /* 110° 允许的差速上限(与 DELTA_MAX 一致) */
+#define STRAIGHT_DEADZONE 3.0f   /* 直道 ±3 误差死区: 只滤噪声, 超过照常实时纠正 */
 
 /* 转弯过程: 起步柔和 -> 逐渐加力 -> 转够/转错立刻收(无任何保持) */
 #define TURN_DONE_ERR    12.0f   /* 误差回落到这个以下 = 基本转够了 */
+#define TURN_DONE_BAL    12.0f   /* 转弯中 |L-R| 归一化小于此 = 左右电感已一样 -> 停 */
+#define TURN_DONE_LR_MIN 18.0f   /* 且两路都要在线, 避免"都没压到线"被当成平衡 */
 #define TURN_DONE_CNT    3       /* 连续 3 周期(15ms)确认才收油 */
 #define TURN_BIAS_K      4.0f    /* 转弯中按剩余误差补一点方向 */
 #define TURN_BIAS_MAX    300
@@ -225,6 +231,13 @@ static void Curve_Update(float eh)
         {
             if (s_curve_cnt < 250) s_curve_cnt++;
         }
+        else if (s_turn_active)
+        {
+            /* 连续锯齿/连续 90°: 反向是【下一个弯】, 不是噪声。
+             * 不重置确认, 否则每个弯都要重新确认 -> 中间掉速、丢线。 */
+            s_curve_sign = sg;
+            if (s_curve_cnt < CURVE_CONFIRM) s_curve_cnt = CURVE_CONFIRM;
+        }
         else
         {
             s_curve_sign = sg;       /* 方向一变就重新数, 邻线抖动进不了确认 */
@@ -252,9 +265,19 @@ static void Curve_Update(float eh)
 
     if (s_turn_active)
     {
+        float lr_diff = fabsf(ADC_Lf - ADC_Rf);
+        uint8_t lr_bal = 0;
+
+        /* 左右两个电感已经基本一样 = 车头回到线上 = 转够了 */
+        if ((lr_diff < TURN_DONE_BAL) &&
+            (ADC_Lf > TURN_DONE_LR_MIN) && (ADC_Rf > TURN_DONE_LR_MIN))
+        {
+            lr_bal = 1;
+        }
+
         if (s_turn_tick < 60000) s_turn_tick++;
 
-        if (a < TURN_DONE_ERR)
+        if ((a < TURN_DONE_ERR) || lr_bal)
         {
             if (s_turn_done < 250) s_turn_done++;
         }
@@ -263,8 +286,9 @@ static void Curve_Update(float eh)
             s_turn_done = 0;
         }
 
-        /* ---- 转错保护: 误差持续反向且够大 ---- */
-        if ((sg != 0) && (sg != s_turn_dir) && (a > TURN_WRONG_ERR))
+        /* ---- 转错保护: 误差反向够大, 且【还没】回中 ----
+         * 已回中(lr_bal)的反向属于"下一个锯齿弯", 不算转错。 */
+        if ((sg != 0) && (sg != s_turn_dir) && (a > TURN_WRONG_ERR) && !lr_bal)
         {
             if (s_turn_wrong < 250) s_turn_wrong++;
         }
@@ -386,6 +410,14 @@ void PID_Calculate(void)
     /* ---- 弯道分级 + 转弯过程实时判断 ---- */
     Curve_Update(eh_use);
 
+    /* 直道 ±3 死区: 只滤掉邻线/噪声引起的微抖,
+     * 误差超过 3 就照常实时纠正, 不影响跟线。 */
+    if ((s_curve_grade == 0) && !Track_Straight &&
+        (fabsf(eh_use) < STRAIGHT_DEADZONE))
+    {
+        Speed_Delta = 0;
+    }
+
     /* 90°/110° 转弯进行中: 按【剩余误差】实时补方向。
      * 误差归零 -> 偏置消失(转够了); 误差反向 -> 偏置清零, PD 反向拉回(转过了)。 */
     if (s_turn_active)
@@ -427,12 +459,16 @@ void PID_Calculate(void)
  * ------------------------------------------------------------ */
 void PID_LostLine_Check(void)
 {
+    float hsum = ADC_Lf + ADC_Rf;   /* 横置两路之和: 真正代表"还压不压得住线" */
+
     if (fabsf(Error) > 11.0f)
     {
         Last_Dir = (Error > 0.0f) ? 1 : -1;    /* 记住最后偏差方向 */
     }
 
-    if (ADC_Strength < TRACK_ONLINE_TH)
+    /* 只认横置: 锯齿/直角中竖置抬头会让 ADC_Strength 很高,
+     * 用综合场强会漏判丢线; 用横置和更准, 且竖置强时不会误判。 */
+    if (hsum < LOST_H_SUM_TH)
     {
         if (Lost_Timer < 60000) Lost_Timer++;
         if (Lost_Timer >= LOST_CONFIRM)
@@ -443,7 +479,7 @@ void PID_LostLine_Check(void)
     else
     {
         Lost_Timer = 0;
-        Lost_State = 0;
+        Lost_State = 0;          /* 一压回线就立刻恢复, 不做保持 */
     }
 }
 
@@ -458,9 +494,9 @@ void PID_LostLine_Check(void)
 #define CROSS_HOLD_KP    8.0f
 #define CROSS_HOLD_KD    3.0f
 #define CROSS_HOLD_MAX   350   /* 航向修正的最大差速, 别和转向抢戏 */
-#define CROSS_LINE_KP    3.0f  /* 十字偏心小修正, 纠正弯道后斜着进路口 */
-#define CROSS_LINE_KD    1.0f
-#define CROSS_LINE_MAX   120   /* 保持直行的同时只允许小幅横向对中 */
+#define CROSS_LINE_KP    6.0f  /* 十字偏心修正加强: 进路口前把小弯留下的偏差拉正 */
+#define CROSS_LINE_KD    1.5f
+#define CROSS_LINE_MAX   250   /* 允许更大的对中修正(仍受 DELTA_MAX 限制) */
 
 int16_t PID_Apply(int16_t delta)
 {
@@ -548,6 +584,10 @@ int16_t PID_Speed_Schedule(int16_t basic)
     else if (Lost_State)
     {
         ratio = LOST_SPEED_RATIO;
+    }
+    else if (Track_State == TRK_ZIGZAG)
+    {
+        ratio = ZIG_SPEED_RATIO;      /* 连续锯齿: 略降速, 减少丢线 */
     }
     else if (Curve_Turn_Now || (Curve_Grade_Now >= 2))
     {

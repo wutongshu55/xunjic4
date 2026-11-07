@@ -12,8 +12,8 @@
  * 基准占空比固定 35%(PWM_BASE_DUTY), 全程恒速:
  * 只有直角/大弯瞬间降到 55%、丢线降到 45%, 其余全程 30% 恒速。
  * 名义速度 SPEED_NOMINAL_MMS 只用于差速换算与"等效速度"显示。 */
-#define PWM_BASE_DUTY     3000   /* 固定基准占空比: 3000 = 30% */
-#define SPEED_NOMINAL_MMS  300   /* 名义速度(mm/s): 与 30% PWM 对应的等效值 */
+#define PWM_BASE_DUTY     2500   /* 固定基准占空比: 2500 = 25% */
+#define SPEED_NOMINAL_MMS  250   /* 名义速度(mm/s): 与 25% PWM 对应的等效值 */
 
 /* 圈数功能已【删除】: 不再计圈, 也不存在"跑满圈数自动停车"。
  * 唯一能让车停下来的方式 = 按 KEY4(或运行页按 KEY4 回发车页)。 */
