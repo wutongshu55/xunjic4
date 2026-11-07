@@ -62,7 +62,7 @@ volatile int16_t Speed_Delta = 0;
 /* 弯道降速: 只保留"直角/大弯瞬间降速"这一条。
  * 45° 及以下不减速(直线/小弯保持流畅), 90°/110° 一确认立刻降到 55%,
  * 降速后按剩余误差一点点转, 转够立即恢复全速。 */
-#define CURVE_SPEED_RATIO 0.55f
+#define CURVE_SPEED_RATIO 0.6f
 
 /* 【前瞻滞后 / 延迟反应 / 速度调度开关 已全部删除】
  * 原 CURVE_TH1/2、Lag_Ratio、Lag_Cycles、LOOKAHEAD_MM、LAG_DISP_MAX、
@@ -159,12 +159,12 @@ void PID_Yaw_Update(void)
  *  不使用固定时间、固定角度、固定前瞻段, 所以不会"转晚了/转过头回不来"。
  * ============================================================ */
 #define CURVE_45_MIN     22.0f   /* >22 = 45° 级弯(轻弯) */
-#define CURVE_90_MIN     55.0f   /* >55 = 90° 级弯 */
+#define CURVE_90_MIN     47.0f   /* >55 = 90° 级弯 */
 #define CURVE_110_MIN    80.0f   /* >80 = 110° 级弯(最急) */
 #define CURVE_CONFIRM    2       /* 同方向连续 2 周期(10ms)就确认, 更快进弯 */
 #define NEIGH_CAP        350     /* 未确认的大误差(邻线/瞬态)差速上限 */
 #define DELTA_CAP_45     600     /* 45° 允许的差速上限 */
-#define DELTA_CAP_90     850     /* 90° 允许的差速上限 */
+#define DELTA_CAP_90     950     /* 90° 允许的差速上限 */
 #define DELTA_CAP_110    1000    /* 110° 允许的差速上限 */
 
 /* 转弯过程: 起步柔和 -> 逐渐加力 -> 转够/转错立刻收(无任何保持) */
@@ -173,7 +173,7 @@ void PID_Yaw_Update(void)
 #define TURN_BIAS_K      4.0f    /* 转弯中按剩余误差补一点方向 */
 #define TURN_BIAS_MAX    300
 #define TURN_RAMP_TICK   10      /* 前 50ms 从 60% 力渐进到 100%: 一点一点转 */
-#define TURN_WRONG_ERR   20.0f   /* 转弯中误差反向且超过此值 -> 可能转错 */
+#define TURN_WRONG_ERR   26.0f   /* 转弯中误差反向且超过此值 -> 可能转错 */
 #define TURN_WRONG_CNT   3       /* 连续 3 拍 -> 判定转错, 立刻结束 */
 #define TURN_BLOCK_TICK  24      /* 转错后 120ms 内不再进弯, 让 PD 反向拉回 */
 #define TURN_MAX_TICK    400     /* 2s 保险, 防误判卡死 */

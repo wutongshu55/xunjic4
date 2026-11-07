@@ -52,7 +52,7 @@ float    Track_Speed_Ratio = 1.0f; /* 元素期间的速度系数 */
 #define CROSS_V_BASE_MIN 8     /* 竖置巡航基线高于此值时才启用"相对抬升"判断 */
 #define CROSS_V_RISE     1.8f  /* 竖置须达到自身巡航基线的 1.8 倍 */
 #define CROSS_BAL        45    /* 横置左右偏差(%)须 <= 45 才认十字 —— 见下方说明 */
-#define CROSS_ERR_MAX    35.0f /* 横置误差 > 35 = 正在转弯, 不认十字。
+#define CROSS_ERR_MAX    28.0f /* 横置误差 > 35 = 正在转弯, 不认十字。
                                 * 90° 弯的交叉导线同样会让竖置抬头, 以前只靠
                                 * 横置对称性排除, 会误判成路口强制直行 120ms,
                                 * 表现就是"直角弯转弯延迟高 / 冲出去才打方向"。 */
